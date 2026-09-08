@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 132fe99d6b72ee24ca2a97c9cb7d09ca, type: 3}
+  m_Name: Crop_Tomato
+  m_EditorClassIdentifier: LittleFarmStory.Runtime::LittleFarmStory.Farming.CropDefinition
+  cropId: tomato
+  displayName: Tomato
+  seedItemId: 
+  harvestItemId: 
+  growthStages: 3
+  secondsPerStage: 20
+  stagePrefabs: []
+  seedCost: 9
+  sellValue: 22
+  yieldMin: 1
+  yieldMax: 3
+  cropColor: {r: 0.8784314, g: 0.29411766, b: 0.23529412, a: 1}
+  soilColor: {r: 0.3882353, g: 0.2627451, b: 0.16862746, a: 1}

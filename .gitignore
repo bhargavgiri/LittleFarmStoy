@@ -1,0 +1,87 @@
+# ==========================================================================
+# Little Farm Story - Unity .gitignore
+#
+# Generated Unity folders are excluded; the three folders Unity actually needs
+# to reconstruct the project are NOT:
+#     Assets/  Packages/  ProjectSettings/
+#
+# Patterns for generated folders are root-anchored with a leading slash so they
+# can never accidentally match a same-named folder inside Assets/.
+# ==========================================================================
+
+# ---- Unity generated folders (root level only) ----------------------------
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emory[Cc]aptures/
+
+# Unity Addressables / asset store generated output
+/[Aa]ssets/[Ss]treamingAssets/aa.meta
+/[Aa]ssets/[Ss]treamingAssets/aa/*
+
+# Recordings and crash reports
+/[Rr]ecordings/
+sysinfo.txt
+crashlytics-build.properties
+
+# ---- Unity generated project / solution files -----------------------------
+# Regenerated automatically from the .asmdef files, never edited by hand.
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# ---- IDE / editor ---------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+.consulo/
+*.swp
+*~
+.vsconfig
+
+# ---- Gradle / Android build -----------------------------------------------
+.gradle/
+*.apk
+*.aab
+*.unitypackage
+*.app
+
+# ---- OS noise -------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+[Tt]humbs.db
+desktop.ini
+
+# ---- Secrets --------------------------------------------------------------
+# Never commit signing keys or credentials.
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+keystore.properties
+google-services.json
+GoogleService-Info.plist
+.env
+.env.*
+secrets.json

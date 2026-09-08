@@ -1,0 +1,20 @@
+{
+    "name": "LittleFarmStory.Editor",
+    "rootNamespace": "LittleFarmStory.EditorTools",
+    "references": [
+        "LittleFarmStory.Runtime",
+        "Unity.InputSystem",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
