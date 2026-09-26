@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using LittleFarmStory.Animals;
 using LittleFarmStory.CameraSystem;
 using LittleFarmStory.Core;
+using LittleFarmStory.Economy;
 using LittleFarmStory.Farming;
 using LittleFarmStory.Input;
 using LittleFarmStory.Interaction;
@@ -32,6 +34,26 @@ namespace LittleFarmStory.EditorTools
 
         // Authored growth pacing. With 3 growth stages these give 18s / 27s / 36s full cycles,
         // which keeps the prototype testable without touching the dev multiplier.
+        // ---- development pacing. Both are EDITOR ONLY: a device build always runs at the
+        // authored speed, so these can be left dialled up without affecting the real game.
+        // Set either to 1 to feel the shipping pace.
+        private const float DevelopmentGrowthMultiplier = 4f;
+        private const float DevelopmentAnimalMultiplier = 5f;
+
+        // Console tracing for the animal chain and for interaction focus. On while the animal
+        // loops are being proven; set both to false once the automated test passes.
+        private const bool AnimalDiagnostics = true;
+        private const bool InteractionDiagnostics = true;
+
+        /// <summary>Logs every transaction and every refusal while the economy is being proven.</summary>
+        private const bool EconomyDiagnostics = true;
+
+        // ---- economy. The shop catalogue and the crop assets are both authored from these,
+        // so a price exists in exactly one place.
+        private const int StartingCoins = 100;
+        private const int WheatSeedPrice = 2;
+        private const int WheatSellPrice = 4;
+
         private const float WheatSecondsPerStage = 6f;
         private const float TomatoSecondsPerStage = 9f;
         private const float CornSecondsPerStage = 12f;
@@ -45,7 +67,7 @@ namespace LittleFarmStory.EditorTools
         private static readonly Vector3 CowCentre = new Vector3(-16.5f, 0f, -20f);
         private static readonly Vector3 MarketCentre = new Vector3(16.5f, 0f, -8f);
         private static readonly Vector3 HomeCentre = new Vector3(16.5f, 0f, -20f);
-        private static readonly Vector3 PondCentre = new Vector3(-26f, 0f, 27f);
+        private static readonly Vector3 PondCentre = new Vector3(-26.8f, 0f, 27f);
 
         [MenuItem("Little Farm Story/Run Full Setup (Player Settings + Scene)", false, 0)]
         public static void RunFullSetup()
@@ -67,32 +89,73 @@ namespace LittleFarmStory.EditorTools
             ProtoAssets.EnsureFolders();
             UrpQualitySetup.Apply();
 
+            // Gate the whole build on TMP BEFORE the current scene is replaced. Discovering a
+            // missing font halfway through would leave a half-built farm and a blank HUD.
+            TextMeshProSetup.EnsureImported();
+
+            if (TextMeshProSetup.ResolveDefaultFont() == null)
+            {
+                Debug.LogError(
+                    "Little Farm Story: scene build cancelled - no TextMeshPro font asset. " +
+                    "Import Window > TextMeshPro > Import TMP Essential Resources, then rebuild. " +
+                    "Nothing was changed.");
+                return;
+            }
+
             int interactableLayer = ProtoAssets.EnsureLayer(InteractableLayerName);
+
+            // ORDER MATTERS. EditorSceneManager.NewScene unloads assets nothing in the new
+            // scene references yet, which turns a freshly created ScriptableObject reference
+            // into Unity's "fake null": the managed wrapper compares == null even though the
+            // asset is still on disk. Authoring the crop assets before this line is exactly
+            // what silently disabled crop visuals and the HUD counters for three phases -
+            // ConfigureCropGrowth and WireInventoryCounters both hit their null guards and
+            // returned, while SerializedObject assignment still resolved the underlying
+            // instance id, so the scene looked correctly wired.
+            //
+            // Everything asset-related now happens AFTER the scene exists.
+            Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
+            // The palette creates material assets, so it is subject to the same unload hazard
+            // and is built after the scene exists too.
             ProtoPalette p = ProtoPalette.Create();
 
+            // Seed cost and sell value are kept in step with the shop catalogue below, so the
+            // crop asset and the shop can never quote two different prices for the same item.
             CropDefinition wheat = EnsureCrop("Crop_Wheat", "wheat", "Wheat",
-                ProtoPalette.WheatAccent, ProtoPalette.Hex("6B4A2F"), 5, 12);
+                ProtoPalette.WheatAccent, ProtoPalette.Hex("6B4A2F"), WheatSeedPrice, WheatSellPrice);
             CropDefinition tomato = EnsureCrop("Crop_Tomato", "tomato", "Tomato",
                 ProtoPalette.TomatoAccent, ProtoPalette.Hex("63432B"), 9, 22);
             CropDefinition corn = EnsureCrop("Crop_Corn", "corn", "Corn",
                 ProtoPalette.CornAccent, ProtoPalette.Hex("6E4C30"), 14, 34);
 
             FarmingSettings farmingSettings = EnsureFarmingSettings();
-            AssetDatabase.SaveAssets();
 
-            Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
-
-            // Prefabs and crop visuals are generated after the empty scene exists, because
-            // assembling a prefab needs somewhere to build the temporary hierarchy.
             ConfigureCropGrowth(wheat, p, WheatSecondsPerStage, 1, 3);
             ConfigureCropGrowth(tomato, p, TomatoSecondsPerStage, 1, 2);
             ConfigureCropGrowth(corn, p, CornSecondsPerStage, 1, 2);
 
+            // Icons are generated before anything that uses them - the plot prefab and the
+            // animal prefabs both hang a world-space badge built from this set.
+            UiIconLibrary.BuildAll();
+
             PropLibrary.Props props = PropLibrary.BuildAll(p);
-            GameObject chickenPrefab = CharacterBuilder.BuildChickenPrefab(p);
+            PropLibraryExtra.Extras extras = PropLibraryExtra.BuildAll(p);
+            GameObject farmerPrefab = CharacterBuilder.BuildFarmerPrefab(p);
+            GameObject chickenPrefabA = CharacterBuilder.BuildChickenPrefab(p, "Chicken_A", p.White);
+            GameObject chickenPrefabB = CharacterBuilder.BuildChickenPrefab(p, "Chicken_B", p.ChickenBrown);
             GameObject cowPrefab = CharacterBuilder.BuildCowPrefab(p);
 
+            // Animal definitions are authored AFTER the prefabs exist, because a definition holds
+            // a prefab reference. The habitat and the instance id are wired per instance instead.
+            AnimalDefinition chickenDefinition = EnsureChickenDefinition(chickenPrefabA);
+            AnimalDefinition cowDefinition = EnsureCowDefinition(cowPrefab);
+
+            EconomySettings economySettings = EnsureEconomySettings();
+            ShopDefinition shopDefinition = EnsureShopDefinition(wheat);
+
             AssetDatabase.SaveAssets();
+            VerifyCropVisuals(wheat, tomato, corn);
 
             FarmPlot plotPrefab = BuildPlotPrefab(p, interactableLayer);
 
@@ -107,16 +170,65 @@ namespace LittleFarmStory.EditorTools
             BuildEventSystem(systemsRoot.transform);
 
             BuildWorld(worldRoot.transform, p, plotPrefab, wheat, tomato, corn,
-                interactableLayer, farmingSettings, props, chickenPrefab, cowPrefab);
+                interactableLayer, farmingSettings, props, extras,
+                chickenPrefabA, chickenPrefabB, cowPrefab,
+                chickenDefinition, cowDefinition);
 
-            GameObject player = BuildPlayer(actorsRoot.transform, p);
+            GameObject player = BuildPlayer(
+                actorsRoot.transform, p, farmerPrefab, economySettings, shopDefinition);
+
+            // Habitats keep animals from crowding the player. Resolved once here, at build time.
+            AnimalHabitat[] habitats = worldRoot.GetComponentsInChildren<AnimalHabitat>(true);
+            for (int i = 0; i < habitats.Length; i++)
+            {
+                habitats[i].SetPlayer(player.transform);
+            }
             FarmCameraController cameraController = BuildCamera(actorsRoot.transform, player.transform);
 
-            HudReferences hud = BuildHud(uiRoot.transform);
+            EconomyManager economyManager = player.GetComponent<EconomyManager>();
+            PlayerController playerControllerForShop = player.GetComponent<PlayerController>();
+            InteractionController interactionControllerForShop = player.GetComponent<InteractionController>();
+
+            HudBuilder.Result hud = HudBuilder.Build(
+                uiRoot.transform, BuildResourceTable(wheat, corn, chickenDefinition, cowDefinition),
+                shopDefinition, economyManager, playerControllerForShop, interactionControllerForShop);
+
+            if (hud == null)
+            {
+                Debug.LogError("Little Farm Story: the HUD could not be built; aborting the scene build.");
+                return;
+            }
+
+            // The market's physical entrance already exists (built with BuildWorld, above); it
+            // can only be pointed at the shop panel now that the panel exists.
+            MarketInteractable market = worldRoot.GetComponentInChildren<MarketInteractable>(true);
+            if (market != null)
+            {
+                market.EditorSetShopPanel(hud.ShopPanel);
+            }
+            else
+            {
+                Debug.LogError("Little Farm Story: no MarketInteractable found in the world; " +
+                               "the shop can never be reached.");
+            }
 
             WireEverything(player, cameraController, hud, interactableLayer, wheat);
 
+            bool playable = VerifyBuild(
+                player, worldRoot, hud.Hud, wheat, tomato, corn, chickenDefinition, cowDefinition,
+                shopDefinition, economySettings);
+
             ProtoAssets.MarkStatic(worldRoot);
+
+            // ...but not the animals. They walk now, and a batching-static renderer is baked
+            // into a combined mesh at its authored transform - moving it afterwards does not
+            // work. This also corrects the Phase 4B animals, whose idle motion had the same
+            // conflict.
+            AnimalController[] livestock = worldRoot.GetComponentsInChildren<AnimalController>(true);
+            for (int i = 0; i < livestock.Length; i++)
+            {
+                ProtoAssets.ClearStatic(livestock[i].gameObject);
+            }
 
             EditorSceneManager.MarkSceneDirty(scene);
             bool saved = EditorSceneManager.SaveScene(scene, ScenePath);
@@ -130,21 +242,190 @@ namespace LittleFarmStory.EditorTools
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
-            Debug.Log("Little Farm Story: farm scene built at " + ScenePath + ". Press Play to test.");
+            if (playable)
+            {
+                Debug.Log("Little Farm Story: farm scene built at " + ScenePath +
+                          " and verified PLAYABLE. Press Play to test.");
+            }
+            else
+            {
+                Debug.LogError("Little Farm Story: farm scene was saved to " + ScenePath +
+                               " but verification FAILED. Do not treat this build as playable.");
+            }
         }
 
         // ================================================================ data assets
+
+        /// <summary>
+        /// Loads a ScriptableObject asset, creating it when missing, and re-resolves it if the
+        /// managed reference has been unloaded. Unity returns a "fake null" for an asset whose
+        /// wrapper was unloaded, so a plain null check would create a duplicate at a path that
+        /// already exists; loading again by path is what actually revives the reference.
+        /// </summary>
+        private static T LoadOrCreate<T>(string path) where T : ScriptableObject
+        {
+            T asset = AssetDatabase.LoadAssetAtPath<T>(path);
+
+            if (asset != null)
+            {
+                return asset;
+            }
+
+            if (System.IO.File.Exists(path))
+            {
+                // The file is there but the reference is dead: force a reimport and reload.
+                AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+                asset = AssetDatabase.LoadAssetAtPath<T>(path);
+
+                if (asset != null)
+                {
+                    return asset;
+                }
+            }
+
+            asset = ScriptableObject.CreateInstance<T>();
+            AssetDatabase.CreateAsset(asset, path);
+            return AssetDatabase.LoadAssetAtPath<T>(path);
+        }
+
+        // ---------------------------------------------------------------- economy assets
+
+        private static EconomySettings EnsureEconomySettings()
+        {
+            EconomySettings settings =
+                LoadOrCreate<EconomySettings>(ProtoAssets.DataFolder + "/EconomySettings.asset");
+
+            if (settings == null)
+            {
+                Debug.LogError("Little Farm Story: could not create EconomySettings; trade will be impossible.");
+                return null;
+            }
+
+            settings.EditorConfigure(StartingCoins, 0.35f, 0, EconomyDiagnostics);
+            EditorUtility.SetDirty(settings);
+            return settings;
+        }
+
+        /// <summary>
+        /// Authors one shop line. Ids come from the crop asset rather than from literals, so the
+        /// shop can never trade an id the farming system does not recognise.
+        /// </summary>
+        private static ShopItemDefinition EnsureShopItem(
+            string assetName, string itemId, string displayName, string iconName,
+            bool canBuy, int buyPrice, bool canSell, int sellPrice,
+            int minQuantity, int maxQuantity, int step)
+        {
+            ShopItemDefinition item =
+                LoadOrCreate<ShopItemDefinition>(ProtoAssets.DataFolder + "/" + assetName + ".asset");
+
+            if (item == null)
+            {
+                Debug.LogError("Little Farm Story: could not create the shop item asset " + assetName + ".");
+                return null;
+            }
+
+            item.EditorConfigure(
+                itemId, displayName, UiIconLibrary.Get(iconName),
+                canBuy, buyPrice, canSell, sellPrice,
+                minQuantity, maxQuantity, step, true);
+
+            EditorUtility.SetDirty(item);
+            return item;
+        }
+
+        /// <summary>
+        /// The shop catalogue. Wheat seeds are the only thing on sale in this phase; wheat is
+        /// bought back. Adding a crop here is one more entry - no runtime code knows what wheat
+        /// is, and nothing branches on an item id anywhere.
+        ///
+        /// Egg and milk are deliberately absent: AnimalDefinition now carries a produce sell
+        /// price slot, but it is unset, so they have no price and are not tradeable.
+        /// </summary>
+        private static ShopDefinition EnsureShopDefinition(CropDefinition wheat)
+        {
+            ShopDefinition shop =
+                LoadOrCreate<ShopDefinition>(ProtoAssets.DataFolder + "/ShopDefinition.asset");
+
+            if (shop == null)
+            {
+                Debug.LogError("Little Farm Story: could not create the ShopDefinition; trade will be impossible.");
+                return null;
+            }
+
+            if (wheat == null)
+            {
+                Debug.LogError("Little Farm Story: the wheat crop asset is missing, so the shop " +
+                               "catalogue cannot be authored from it.");
+                shop.EditorConfigure(new ShopItemDefinition[0]);
+                EditorUtility.SetDirty(shop);
+                return shop;
+            }
+
+            ShopItemDefinition wheatSeeds = EnsureShopItem(
+                "Shop_WheatSeeds", wheat.SeedItemId, wheat.DisplayName + " Seeds",
+                UiIconLibrary.Names.Seed,
+                true, WheatSeedPrice, false, 0,
+                1, 99, 1);
+
+            ShopItemDefinition wheatProduce = EnsureShopItem(
+                "Shop_Wheat", wheat.HarvestItemId, wheat.DisplayName,
+                UiIconLibrary.Names.Wheat,
+                false, 0, true, WheatSellPrice,
+                1, 99, 1);
+
+            shop.EditorConfigure(new[] { wheatSeeds, wheatProduce });
+            EditorUtility.SetDirty(shop);
+            return shop;
+        }
+
+        private static AnimalDefinition EnsureAnimal(string assetName)
+        {
+            return LoadOrCreate<AnimalDefinition>(ProtoAssets.DataFolder + "/" + assetName + ".asset");
+        }
+
+        /// <summary>
+        /// Chicken: cheap feed, a fast cycle. Tuned so a full feed-to-collect loop can be seen
+        /// inside a short play session without touching any dev multiplier.
+        /// </summary>
+        private static AnimalDefinition EnsureChickenDefinition(GameObject prefab)
+        {
+            AnimalDefinition definition = EnsureAnimal("Animal_Chicken");
+
+            definition.EditorConfigureIdentity("chicken", "Chicken", AnimalType.Chicken, prefab, 120);
+            definition.EditorConfigureLoop(
+                ItemIds.Harvest("wheat"), 1, 45f,
+                ItemIds.Egg, 1, 25f);
+            definition.EditorConfigureMovement(0.62f, 260f, 2.6f, 0.8f, 0.55f, 1);
+
+            EditorUtility.SetDirty(definition);
+            return definition;
+        }
+
+        /// <summary>Cow: dearer feed, a slower cycle, a bigger yield.</summary>
+        private static AnimalDefinition EnsureCowDefinition(GameObject prefab)
+        {
+            AnimalDefinition definition = EnsureAnimal("Animal_Cow");
+
+            definition.EditorConfigureIdentity("cow", "Cow", AnimalType.Cow, prefab, 450);
+            definition.EditorConfigureLoop(
+                ItemIds.Harvest("corn"), 2, 75f,
+                ItemIds.Milk, 2, 50f);
+            definition.EditorConfigureMovement(0.34f, 110f, 5.5f, 0.6f, 1.1f, 1);
+
+            EditorUtility.SetDirty(definition);
+            return definition;
+        }
 
         private static CropDefinition EnsureCrop(
             string assetName, string id, string display, Color crop, Color soil, int seedCost, int sellValue)
         {
             string path = ProtoAssets.DataFolder + "/" + assetName + ".asset";
-            CropDefinition definition = AssetDatabase.LoadAssetAtPath<CropDefinition>(path);
+            CropDefinition definition = LoadOrCreate<CropDefinition>(path);
 
             if (definition == null)
             {
-                definition = ScriptableObject.CreateInstance<CropDefinition>();
-                AssetDatabase.CreateAsset(definition, path);
+                Debug.LogError("Little Farm Story: could not load or create the crop asset at " + path);
+                return null;
             }
 
             definition.EditorConfigure(id, display, crop, soil, seedCost, sellValue);
@@ -152,12 +433,28 @@ namespace LittleFarmStory.EditorTools
             return definition;
         }
 
-        /// <summary>Generates the growth-stage prefabs for a crop and writes its growth data.</summary>
+        /// <summary>
+        /// Generates the growth-stage prefabs for a crop and writes its growth data.
+        ///
+        /// Every failure path here logs. A previous build silently produced crops with an
+        /// empty stagePrefabs array, which meant planted crops rendered nothing at all and
+        /// there was no way to tell from the console - so this now reports rather than
+        /// returning quietly.
+        /// </summary>
         private static void ConfigureCropGrowth(
             CropDefinition definition, ProtoPalette p, float secondsPerStage, int yieldMin, int yieldMax)
         {
             if (definition == null)
             {
+                Debug.LogError("Little Farm Story: ConfigureCropGrowth was handed a null CropDefinition. " +
+                               "The crop asset failed to load or create, so no crop visuals will exist.");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(definition.CropId))
+            {
+                Debug.LogError("Little Farm Story: crop asset '" + definition.name +
+                               "' has an empty CropId; cannot generate its stage prefabs.");
                 return;
             }
 
@@ -170,25 +467,420 @@ namespace LittleFarmStory.EditorTools
                 definition.CropColor,
                 stages + 1);
 
+            if (visuals == null || visuals.Length == 0)
+            {
+                Debug.LogError("Little Farm Story: no stage prefabs were produced for crop '" +
+                               definition.CropId + "'. Planted crops will be invisible.");
+                return;
+            }
+
+            for (int i = 0; i < visuals.Length; i++)
+            {
+                if (visuals[i] == null)
+                {
+                    Debug.LogError("Little Farm Story: crop '" + definition.CropId +
+                                   "' stage " + i + " prefab is null.");
+                }
+            }
+
             definition.EditorConfigureGrowth(stages, secondsPerStage, yieldMin, yieldMax, visuals);
             EditorUtility.SetDirty(definition);
+        }
+
+        /// <summary>
+        /// Post-generation check: confirms each crop actually ended up with visuals.
+        /// Cheap insurance against the silent failure described above.
+        /// </summary>
+        /// <summary>
+        /// Fails loudly if the generated scene is not actually playable.
+        ///
+        /// The regression this exists to prevent was not a logic bug: the builder reported
+        /// success while three null guards quietly returned, so the scene looked correctly
+        /// wired and played dead. Every gameplay precondition is asserted here, and the final
+        /// line says PLAYABLE or NOT PLAYABLE rather than "scene built".
+        /// </summary>
+        private static bool VerifyBuild(
+            GameObject player, GameObject worldRoot, HudController hud,
+            CropDefinition wheat, CropDefinition tomato, CropDefinition corn,
+            AnimalDefinition chicken, AnimalDefinition cow,
+            ShopDefinition shop, EconomySettings economySettings)
+        {
+            int failures = 0;
+
+            failures += Require(player != null, "the Player object is missing");
+            failures += Require(player != null && player.GetComponent<PlayerController>() != null,
+                "Player has no PlayerController");
+            failures += Require(player != null && player.GetComponent<PlayerInputProvider>() != null,
+                "Player has no PlayerInputProvider");
+            failures += Require(player != null && player.GetComponent<PlayerInventory>() != null,
+                "Player has no PlayerInventory");
+            failures += Require(player != null && player.GetComponent<ActionFeedbackChannel>() != null,
+                "Player has no ActionFeedbackChannel");
+            failures += Require(player != null && player.GetComponent<InteractionController>() != null,
+                "Player has no InteractionController");
+
+            // ---------------------------------------------------------------- farming
+            CropDefinition[] crops = { wheat, tomato, corn };
+
+            for (int i = 0; i < crops.Length; i++)
+            {
+                CropDefinition crop = crops[i];
+
+                if (crop == null)
+                {
+                    failures += Require(false, "a CropDefinition failed to load");
+                    continue;
+                }
+
+                failures += Require(crop.GetStagePrefab(0) != null,
+                    "crop " + crop.CropId + " has no stage-0 prefab, so planted crops would be invisible");
+                failures += Require(crop.GetStagePrefab(crop.GrowthStages) != null,
+                    "crop " + crop.CropId + " has no mature-stage prefab");
+                failures += Require(!string.IsNullOrEmpty(crop.SeedItemId),
+                    "crop " + crop.CropId + " has no seed item id");
+                failures += Require(crop.SeedItemId != crop.HarvestItemId,
+                    "crop " + crop.CropId + " uses the same id for seed and harvest");
+            }
+
+            FarmGrid[] grids = worldRoot != null
+                ? worldRoot.GetComponentsInChildren<FarmGrid>(true)
+                : new FarmGrid[0];
+
+            failures += Require(grids.Length >= 3, "expected three FarmGrid fields, found " + grids.Length);
+
+            for (int i = 0; i < grids.Length; i++)
+            {
+                failures += Require(grids[i].AssignedCrop != null,
+                    "FarmGrid " + grids[i].FieldId + " has no assigned crop");
+            }
+
+            GameObject plotAsset = AssetDatabase.LoadAssetAtPath<GameObject>(PlotPrefabPath);
+            FarmPlot plotPrefabAsset = plotAsset != null ? plotAsset.GetComponent<FarmPlot>() : null;
+
+            failures += Require(plotPrefabAsset != null, "the FarmPlot prefab is missing");
+            failures += Require(plotPrefabAsset != null && plotPrefabAsset.GetComponent<Collider>() != null,
+                "the FarmPlot prefab has no collider, so the player could never focus a plot");
+
+            // ---------------------------------------------------------------- animals
+            AnimalDefinition[] animalDefinitions = { chicken, cow };
+
+            for (int i = 0; i < animalDefinitions.Length; i++)
+            {
+                AnimalDefinition definition = animalDefinitions[i];
+
+                if (definition == null)
+                {
+                    failures += Require(false, "an AnimalDefinition failed to load");
+                    continue;
+                }
+
+                failures += Require(!string.IsNullOrEmpty(definition.FeedItemId),
+                    "animal " + definition.AnimalId + " has no feed item id");
+                failures += Require(!string.IsNullOrEmpty(definition.ProductItemId),
+                    "animal " + definition.AnimalId + " has no product item id");
+            }
+
+            AnimalHabitat[] habitats = worldRoot != null
+                ? worldRoot.GetComponentsInChildren<AnimalHabitat>(true)
+                : new AnimalHabitat[0];
+
+            failures += Require(habitats.Length >= 2, "expected two AnimalHabitats, found " + habitats.Length);
+
+            AnimalController[] animals = worldRoot != null
+                ? worldRoot.GetComponentsInChildren<AnimalController>(true)
+                : new AnimalController[0];
+
+            failures += Require(animals.Length >= 3, "expected at least three animals, found " + animals.Length);
+
+            for (int i = 0; i < animals.Length; i++)
+            {
+                AnimalController animal = animals[i];
+
+                failures += Require(animal.Definition != null,
+                    "animal " + animal.name + " has no AnimalDefinition");
+                failures += Require(animal.Habitat != null,
+                    "animal " + animal.name + " has no habitat, so it would never simulate");
+                failures += Require(animal.GetComponent<AnimalInteraction>() != null,
+                    "animal " + animal.name + " has no AnimalInteraction");
+                failures += Require(animal.GetComponent<Collider>() != null,
+                    "animal " + animal.name + " has no collider, so the player could never focus it");
+            }
+
+            // ------------------------------------------- inventory covers every id the loops need
+            PlayerInventory inventory = player != null ? player.GetComponent<PlayerInventory>() : null;
+
+            if (inventory != null && wheat != null && chicken != null && cow != null)
+            {
+                SerializedProperty items = new SerializedObject(inventory).FindProperty("startingItems");
+
+                failures += Require(items != null && items.arraySize > 0, "PlayerInventory has no starting stock");
+                failures += Require(ContainsItem(items, wheat.SeedItemId, 1),
+                    "the player starts with no " + wheat.SeedItemId + ", so planting could never be tested");
+                failures += Require(ContainsItem(items, chicken.FeedItemId, chicken.FeedAmount),
+                    "the player starts with no " + chicken.FeedItemId + ", so the chicken could never be fed");
+                failures += Require(ContainsItem(items, cow.FeedItemId, cow.FeedAmount),
+                    "the player starts with no " + cow.FeedItemId + ", so the cow could never be fed");
+            }
+
+            // ---------------------------------------------------------------- economy
+            CurrencyWallet wallet = player != null ? player.GetComponent<CurrencyWallet>() : null;
+            EconomyManager economy = player != null ? player.GetComponent<EconomyManager>() : null;
+
+            failures += Require(wallet != null, "the Player has no CurrencyWallet, so coins do not exist");
+            failures += Require(economy != null, "the Player has no EconomyManager, so nothing can be traded");
+            failures += Require(economySettings != null, "the EconomySettings asset is missing");
+            failures += Require(economySettings == null || economySettings.StartingCoins > 0,
+                "the player would start with no coins and could never make a first purchase");
+
+            // Existence alone is not enough: the manager has to point at THIS player's own
+            // wallet and inventory, not merely at some wallet/inventory somewhere. A stray
+            // duplicate would let coins or items exist that a trade could never touch.
+            failures += Require(economy == null || wallet == null || economy.Wallet == wallet,
+                "the EconomyManager's wallet does not match the Player's own CurrencyWallet");
+            failures += Require(economy == null || inventory == null || economy.Inventory == inventory,
+                "the EconomyManager's inventory does not match the Player's own PlayerInventory");
+            failures += Require(economy == null || shop == null || economy.Shop == shop,
+                "the EconomyManager is not pointed at the built ShopDefinition");
+
+            if (Require(shop != null, "the ShopDefinition asset is missing") > 0)
+            {
+                failures++;
+            }
+            else
+            {
+                failures += Require(shop.Count > 0, "the shop catalogue is empty");
+
+                bool anyPurchasable = false;
+                bool anySellable = false;
+
+                for (int i = 0; i < shop.Items.Count; i++)
+                {
+                    ShopItemDefinition item = shop.Items[i];
+
+                    if (Require(item != null, "shop catalogue slot " + i + " is empty") > 0)
+                    {
+                        failures++;
+                        continue;
+                    }
+
+                    failures += Require(!string.IsNullOrEmpty(item.ItemId),
+                        "shop item '" + item.name + "' has no inventory id");
+
+                    // A price of zero on a tradeable line is the failure that would let the
+                    // player buy for nothing or sell for nothing, and it is silent otherwise.
+                    failures += Require(!item.Purchasable || item.BuyPrice > 0,
+                        "shop item '" + item.name + "' is purchasable at a price of " + item.BuyPrice);
+                    failures += Require(!item.Sellable || item.SellPrice > 0,
+                        "shop item '" + item.name + "' is sellable at a price of " + item.SellPrice);
+                    failures += Require(item.MinQuantity <= item.MaxQuantity,
+                        "shop item '" + item.name + "' has a minimum above its maximum");
+
+                    anyPurchasable |= item.Purchasable;
+                    anySellable |= item.Sellable;
+                }
+
+                failures += Require(anyPurchasable, "nothing in the shop can be bought");
+                failures += Require(anySellable, "nothing in the shop can be sold");
+
+                // The ids the shop trades must be ids the farming system actually produces,
+                // or the player would buy seeds that no plot recognises.
+                if (wheat != null)
+                {
+                    failures += Require(shop.Find(wheat.SeedItemId) != null,
+                        "the shop does not stock '" + wheat.SeedItemId + "', so seeds cannot be bought");
+                    failures += Require(shop.Find(wheat.HarvestItemId) != null,
+                        "the shop does not buy '" + wheat.HarvestItemId + "', so the loop cannot close");
+                }
+            }
+
+            // Produce pricing is deliberately absent this phase; assert that, so it cannot be
+            // half-enabled by accident.
+            failures += Require(chicken == null || !chicken.HasProduceSellValue,
+                "the chicken has a produce sell value but egg selling is not implemented yet");
+            failures += Require(cow == null || !cow.HasProduceSellValue,
+                "the cow has a produce sell value but milk selling is not implemented yet");
+
+            // ---------------------------------------------------------------- shop UI
+            ShopPanel shopPanel = hud != null ? hud.GetComponentInChildren<ShopPanel>(true) : null;
+            failures += Require(shopPanel != null, "the HUD has no ShopPanel, so the shop can never open");
+
+            int buyCardCount = hud != null ? hud.GetComponentsInChildren<ShopBuyCard>(true).Length : 0;
+            int sellRowCount = hud != null ? hud.GetComponentsInChildren<ShopSellRow>(true).Length : 0;
+
+            failures += Require(buyCardCount > 0,
+                "the shop panel has no buy cards, so nothing can be purchased through the UI");
+            failures += Require(sellRowCount > 0,
+                "the shop panel has no sell rows, so nothing can be sold through the UI");
+
+            MarketInteractable market = worldRoot != null
+                ? worldRoot.GetComponentInChildren<MarketInteractable>(true)
+                : null;
+
+            failures += Require(market != null,
+                "no MarketInteractable exists in the world, so the shop can never be reached");
+
+            if (market != null)
+            {
+                SerializedProperty marketShopPanel = new SerializedObject(market).FindProperty("shopPanel");
+
+                failures += Require(marketShopPanel != null && marketShopPanel.objectReferenceValue != null,
+                    "the market landmark is not wired to a ShopPanel; interacting with it will do nothing");
+
+                // Not just "wired to a ShopPanel" - wired to the ONE ShopPanel the HUD actually
+                // built. Two shop panels existing would mean the market opens the wrong one.
+                failures += Require(shopPanel == null || marketShopPanel == null ||
+                    ReferenceEquals(marketShopPanel.objectReferenceValue, shopPanel),
+                    "the market is wired to a ShopPanel that is not the one the HUD built");
+            }
+
+            if (hud != null)
+            {
+                SerializedProperty hudWallet = new SerializedObject(hud).FindProperty("wallet");
+                SerializedProperty hudInventory = new SerializedObject(hud).FindProperty("inventory");
+
+                failures += Require(hudWallet != null && hudWallet.objectReferenceValue != null,
+                    "the HUD is not wired to a CurrencyWallet, so the coin display would never update");
+                failures += Require(wallet == null || hudWallet == null ||
+                    ReferenceEquals(hudWallet.objectReferenceValue, wallet),
+                    "the HUD's CurrencyWallet is not the Player's own wallet");
+
+                failures += Require(hudInventory != null && hudInventory.objectReferenceValue != null,
+                    "the HUD is not wired to a PlayerInventory, so resource counts would never appear on screen");
+                failures += Require(inventory == null || hudInventory == null ||
+                    ReferenceEquals(hudInventory.objectReferenceValue, inventory),
+                    "the HUD's PlayerInventory is not the Player's own inventory");
+            }
+
+            // ---------------------------------------------------------------- HUD
+            if (hud != null)
+            {
+                SerializedProperty chips = new SerializedObject(hud).FindProperty("chips");
+
+                failures += Require(chips != null && chips.arraySize > 0,
+                    "the HUD has no resource chips, so item quantities would never appear on screen");
+
+                failures += Require(hud.GetComponentInChildren<LittleFarmStory.UI.ActionPrompt>(true) != null,
+                    "the HUD has no ActionPrompt, so the player would never be told what USE does");
+
+                failures += Require(hud.GetComponentInChildren<LittleFarmStory.UI.ToastPresenter>(true) != null,
+                    "the HUD has no ToastPresenter, so action feedback would never appear");
+
+                failures += Require(hud.GetComponentInChildren<LittleFarmStory.UI.SafeAreaPanel>(true) != null,
+                    "the HUD has no SafeAreaPanel, so it would sit under a notch on many phones");
+
+                failures += Require(TextMeshProSetup.IsImported,
+                    "TextMeshPro Essential Resources are missing, so every HUD label would render blank");
+
+                // A TMP_Text with no font asset draws nothing at all, which looks like a broken
+                // build rather than a missing import - so it is checked explicitly.
+                TMPro.TMP_Text[] labels = hud.GetComponentsInChildren<TMPro.TMP_Text>(true);
+                failures += Require(labels.Length > 0, "the HUD has no text at all");
+
+                for (int i = 0; i < labels.Length; i++)
+                {
+                    if (labels[i].font == null)
+                    {
+                        failures += Require(false,
+                            "HUD label '" + labels[i].name + "' has no font asset and would render blank");
+                        break;
+                    }
+                }
+            }
+
+            if (failures == 0)
+            {
+                Debug.Log("Little Farm Story: build verification PASSED - the farm is PLAYABLE. " +
+                          grids.Length + " fields, " + habitats.Length + " habitats, " +
+                          animals.Length + " animals.");
+                return true;
+            }
+
+            Debug.LogError("Little Farm Story: build verification FAILED with " + failures +
+                           " problem(s). The generated farm is NOT PLAYABLE - see the errors above.");
+            return false;
+        }
+
+        /// <summary>Logs and counts one verification failure. Returns 1 when the condition failed.</summary>
+        private static int Require(bool condition, string failureMessage)
+        {
+            if (condition)
+            {
+                return 0;
+            }
+
+            Debug.LogError("Little Farm Story: VERIFY - " + failureMessage + ".");
+            return 1;
+        }
+
+        private static bool ContainsItem(SerializedProperty startingItems, string itemId, int minimumAmount)
+        {
+            if (startingItems == null || string.IsNullOrEmpty(itemId))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < startingItems.arraySize; i++)
+            {
+                SerializedProperty element = startingItems.GetArrayElementAtIndex(i);
+                SerializedProperty id = element.FindPropertyRelative("ItemId");
+                SerializedProperty amount = element.FindPropertyRelative("Amount");
+
+                if (id != null && id.stringValue == itemId && amount != null && amount.intValue >= minimumAmount)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void VerifyCropVisuals(params CropDefinition[] crops)
+        {
+            for (int i = 0; i < crops.Length; i++)
+            {
+                CropDefinition crop = crops[i];
+                if (crop == null)
+                {
+                    // Never skipped silently again: a null crop here is precisely the failure
+                    // that left every planted crop invisible.
+                    Debug.LogError("Little Farm Story: a CropDefinition reference was null during " +
+                                   "verification. Crop visuals and the HUD counters will be missing.");
+                    continue;
+                }
+
+                if (crop.GetStagePrefab(0) == null || crop.GetStagePrefab(crop.GrowthStages) == null)
+                {
+                    Debug.LogError("Little Farm Story: crop '" + crop.CropId +
+                                   "' has no stage prefabs assigned after generation. " +
+                                   "Planted crops of this type will render nothing.");
+                }
+            }
         }
 
         private static FarmingSettings EnsureFarmingSettings()
         {
             string path = ProtoAssets.DataFolder + "/FarmingSettings.asset";
-            FarmingSettings settings = AssetDatabase.LoadAssetAtPath<FarmingSettings>(path);
+            bool existed = System.IO.File.Exists(path);
 
-            if (settings != null)
+            FarmingSettings settings = LoadOrCreate<FarmingSettings>(path);
+
+            if (settings == null)
             {
-                // Preserve whatever multiplier the developer has dialled in.
-                return settings;
+                Debug.LogError("Little Farm Story: could not load or create " + path);
+                return null;
             }
 
-            settings = ScriptableObject.CreateInstance<FarmingSettings>();
-            settings.EditorConfigure(1f, true, 0.2f);
-            AssetDatabase.CreateAsset(settings, path);
+            // The builder is the source of truth for the development farm, so it always
+            // re-applies the development pacing rather than preserving a stale value. The flag
+            // is editor-only, so a device build still runs at the authored speed either way.
+            settings.EditorConfigure(DevelopmentGrowthMultiplier, true, 0.2f);
             EditorUtility.SetDirty(settings);
+
+            if (!existed)
+            {
+                Debug.Log("Little Farm Story: created " + path + ".");
+            }
+
             return settings;
         }
 
@@ -220,8 +912,11 @@ namespace LittleFarmStory.EditorTools
 
             GameObject anchor = ProtoAssets.Empty("CropAnchor", temp.transform, new Vector3(0f, 0.24f, 0f));
 
+            AttachReadyMarker(temp.transform, UiIconLibrary.Names.Harvest, 1.35f);
+
             FarmPlot plot = temp.AddComponent<FarmPlot>();
             plot.SetLabel("Soil Plot");
+            plot.SetPriority(InteractableBase.Priority.Plot);
             Wire(plot, "soilRenderer", soil.GetComponent<MeshRenderer>());
             Wire(plot, "cropAnchor", anchor.transform);
 
@@ -249,29 +944,36 @@ namespace LittleFarmStory.EditorTools
             GameObject lightGo = new GameObject("Sun");
             Light sun = lightGo.AddComponent<Light>();
             sun.type = LightType.Directional;
-            sun.color = ProtoPalette.Hex("FFF3DC");
-            sun.intensity = 1.32f;
+            sun.color = ProtoPalette.Hex("FFF1D2");
+            sun.intensity = 1.38f;
             sun.shadows = LightShadows.Soft;
 
             // Deliberately weak: strong shadows fight the cheerful, low-contrast look.
-            sun.shadowStrength = 0.42f;
+            sun.shadowStrength = 0.46f;
             sun.shadowBias = 0.03f;
             sun.shadowNormalBias = 0.2f;
-            lightGo.transform.rotation = Quaternion.Euler(46f, -34f, 0f);
+
+            // Lower and further round than a face-on key, so roof planes and wall faces each
+            // catch a different value and buildings separate from the ground by shading alone.
+            lightGo.transform.rotation = Quaternion.Euler(40f, -52f, 0f);
 
             RenderSettings.sun = sun;
             RenderSettings.skybox = null;
             RenderSettings.ambientMode = AmbientMode.Trilight;
-            RenderSettings.ambientSkyColor = ProtoPalette.Hex("BBD9F2");
-            RenderSettings.ambientEquatorColor = ProtoPalette.Hex("C6D2B4");
-            RenderSettings.ambientGroundColor = ProtoPalette.Hex("6E6350");
+            // Cool sky fill keeps shadowed faces blue rather than muddy grey, which is what
+            // makes shadows read as pleasant instead of dirty.
+            RenderSettings.ambientSkyColor = ProtoPalette.Hex("AFD2EE");
+            RenderSettings.ambientEquatorColor = ProtoPalette.Hex("C9D6B6");
+            RenderSettings.ambientGroundColor = ProtoPalette.Hex("6B6450");
             RenderSettings.ambientIntensity = 1f;
 
+            // Fog starts beyond the farm so nothing the player interacts with is washed out;
+            // it only softens the new background hills into a horizon.
             RenderSettings.fog = true;
             RenderSettings.fogMode = FogMode.Linear;
-            RenderSettings.fogColor = ProtoPalette.Hex("CFE3E8");
-            RenderSettings.fogStartDistance = 62f;
-            RenderSettings.fogEndDistance = 118f;
+            RenderSettings.fogColor = ProtoPalette.Hex("D3E6EA");
+            RenderSettings.fogStartDistance = 74f;
+            RenderSettings.fogEndDistance = 148f;
         }
 
         private static void BuildEventSystem(Transform parent)
@@ -308,53 +1010,65 @@ namespace LittleFarmStory.EditorTools
             Transform root, ProtoPalette p, FarmPlot plotPrefab,
             CropDefinition wheat, CropDefinition tomato, CropDefinition corn,
             int layer, FarmingSettings farmingSettings, PropLibrary.Props props,
-            GameObject chickenPrefab, GameObject cowPrefab)
+            PropLibraryExtra.Extras extras, GameObject chickenPrefabA, GameObject chickenPrefabB,
+            GameObject cowPrefab, AnimalDefinition chickenDefinition, AnimalDefinition cowDefinition)
         {
             Transform environment = ProtoAssets.Empty("Environment", root, Vector3.zero).transform;
             FarmEnvironmentBuilder.BuildGround(environment, p);
+
+            // Relief lives beyond the fence only, so the walkable ground stays one flat collider.
+            TerrainDressing.BuildBackgroundHills(environment, p);
+
             FarmEnvironmentBuilder.BuildPaths(environment, p);
             FarmEnvironmentBuilder.BuildBoundary(environment, p);
 
             Transform fields = ProtoAssets.Empty("Fields", root, Vector3.zero).transform;
-            BuildField(fields, p, plotPrefab, layer, farmingSettings, "Wheat", wheat,
+            BuildField(fields, p, plotPrefab, layer, farmingSettings, props, extras, "Wheat", wheat,
                 WheatCentre, new Vector2(13f, 11f), new Vector2Int(5, 4), p.Wheat);
-            BuildField(fields, p, plotPrefab, layer, farmingSettings, "Tomato", tomato,
+            BuildField(fields, p, plotPrefab, layer, farmingSettings, props, extras, "Tomato", tomato,
                 TomatoCentre, new Vector2(11f, 9f), new Vector2Int(4, 3), p.Tomato);
-            BuildField(fields, p, plotPrefab, layer, farmingSettings, "Corn", corn,
+            BuildField(fields, p, plotPrefab, layer, farmingSettings, props, extras, "Corn", corn,
                 CornCentre, new Vector2(13f, 11f), new Vector2Int(5, 3), p.Corn);
 
             Transform areas = ProtoAssets.Empty("Areas", root, Vector3.zero).transform;
-            BuildProductionArea(areas, p, layer, props, ProductionCentre);
-            BuildChickenArea(areas, p, layer, props, chickenPrefab, ChickenCentre);
-            BuildCowArea(areas, p, layer, props, cowPrefab, CowCentre);
-            BuildMarketArea(areas, p, layer, props, MarketCentre);
-            BuildHomeArea(areas, p, layer, props, HomeCentre);
+            BuildProductionArea(areas, p, layer, props, extras, ProductionCentre);
+            BuildChickenArea(areas, p, layer, props, extras, chickenPrefabA, chickenPrefabB,
+                chickenDefinition, ChickenCentre);
+            BuildCowArea(areas, p, layer, props, extras, cowPrefab, cowDefinition, CowCentre);
+            BuildMarketArea(areas, p, layer, props, extras, MarketCentre);
+            BuildHomeArea(areas, p, layer, props, extras, HomeCentre);
 
             Transform decor = ProtoAssets.Empty("Decoration", root, Vector3.zero).transform;
-            BuildDecoration(decor, p, props);
+            ZoneDressing.BuildTreeline(decor, props);
+            ZoneDressing.BuildGroundcover(decor, props);
+            ZoneDressing.DressPlaza(decor, p, props, extras);
+            FarmEnvironmentBuilder.Pond(decor, p, PondCentre, 3.1f, props);
         }
 
         private static void BuildField(
             Transform parent, ProtoPalette p, FarmPlot plotPrefab, int layer,
-            FarmingSettings farmingSettings, string label, CropDefinition crop,
+            FarmingSettings farmingSettings, PropLibrary.Props props, PropLibraryExtra.Extras extras,
+            string label, CropDefinition crop,
             Vector3 centre, Vector2 padSize, Vector2Int gridSize, Material accent)
         {
             Transform field = ProtoAssets.Empty("Field_" + label, parent, Vector3.zero).transform;
             FarmEnvironmentBuilder.BuildFieldPad(field, p, "Pad_" + label, centre, padSize);
 
-            GameObject gridGo = ProtoAssets.Empty("Grid_" + label, field, centre + new Vector3(0f, 0.12f, 0f));
+            GameObject gridGo = ProtoAssets.Empty("Grid_" + label, field, centre + new Vector3(0f, 0.16f, 0f));
             FarmGrid grid = gridGo.AddComponent<FarmGrid>();
             grid.EditorConfigure("field_" + crop.CropId, crop, gridSize, 2.2f, plotPrefab);
             grid.EditorSetFarmingSettings(farmingSettings);
 
-            // Sign faces the path, painted in the crop colour so the field is identifiable
+            // Sign faces the path, painted in the crop colour, so the field is identifiable
             // from across the farm without reading any UI.
             float hx = padSize.x * 0.5f;
             bool eastSide = centre.x > 0f;
-            float signX = eastSide ? centre.x - hx - 1.9f : centre.x + hx + 1.9f;
+            float signX = eastSide ? centre.x - hx - 2.1f : centre.x + hx + 2.1f;
             Vector3 signPos = new Vector3(signX, 0f, centre.z);
 
             FarmEnvironmentBuilder.Signpost(field, p, "Sign_" + label, signPos, accent, eastSide ? 90f : -90f);
+
+            ZoneDressing.DressField(field, props, extras, centre, padSize, eastSide);
 
             FarmEnvironmentBuilder.Landmark(field, "Interact_" + label, "field_" + crop.CropId,
                 crop.DisplayName + " Field", FarmLandmark.LandmarkKind.Field,
@@ -362,7 +1076,8 @@ namespace LittleFarmStory.EditorTools
         }
 
         private static void BuildProductionArea(
-            Transform parent, ProtoPalette p, int layer, PropLibrary.Props props, Vector3 centre)
+            Transform parent, ProtoPalette p, int layer, PropLibrary.Props props,
+            PropLibraryExtra.Extras extras, Vector3 centre)
         {
             Transform area = ProtoAssets.Empty("Area_Production", parent, centre).transform;
             Mesh box = StylizedMeshLibrary.ChamferBox(0.06f);
@@ -371,289 +1086,265 @@ namespace LittleFarmStory.EditorTools
             ProtoAssets.MeshObject(box, "Yard", area, new Vector3(0f, 0.05f, 0f),
                 new Vector3(11.5f, 0.1f, 9.5f), p.Concrete, false);
 
-            BuildingBuilder.ProductionShelter(area, p, new Vector3(0f, 0f, 0.6f));
+            BuildingBuilder.ProductionShelter(area, p, new Vector3(0f, 0f, 1.4f));
 
             // Three empty machine pads: the footprint the production phase will fill.
             for (int i = 0; i < 3; i++)
             {
                 float x = -3.2f + i * 3.2f;
 
-                ProtoAssets.MeshObject(trim, "MachinePad_" + i, area, new Vector3(x, 0.16f, 0.6f),
+                ProtoAssets.MeshObject(trim, "MachinePad_" + i, area, new Vector3(x, 0.16f, 1.4f),
                     new Vector3(2.6f, 0.16f, 2.6f), p.Stone, false);
-
-                ProtoAssets.MeshObject(trim, "PadStripe_" + i, area, new Vector3(x, 0.25f, 0.6f),
+                ProtoAssets.MeshObject(trim, "PadStripe_" + i, area, new Vector3(x, 0.25f, 1.4f),
                     new Vector3(2.1f, 0.04f, 2.1f), p.RoofMustard, false);
+
+                // Anchor bolts, so a bare pad still reads as prepared for machinery.
+                for (int b = 0; b < 4; b++)
+                {
+                    float bx = x + ((b % 2 == 0) ? -0.85f : 0.85f);
+                    float bz = 1.4f + ((b < 2) ? -0.85f : 0.85f);
+                    ProtoAssets.MeshObject(trim, "Bolt_" + i + "_" + b, area,
+                        new Vector3(bx, 0.29f, bz), new Vector3(0.16f, 0.08f, 0.16f), p.Metal, false);
+                }
             }
 
-            BuildingBuilder.Silo(area, p, new Vector3(4.6f, 0f, -3.6f), 6.8f);
-
-            FarmEnvironmentBuilder.PlaceProp(props.Crate, area, new Vector3(-4.4f, 0.1f, -3.3f), 1.1f, 18f);
-            FarmEnvironmentBuilder.PlaceProp(props.Crate, area, new Vector3(-3.6f, 0.1f, -3.9f), 0.95f, -24f);
-            FarmEnvironmentBuilder.PlaceProp(props.Barrel, area, new Vector3(-4.9f, 0.1f, -2.2f), 1f, 0f);
-            FarmEnvironmentBuilder.PlaceProp(props.Barrel, area, new Vector3(-4.1f, 0.1f, -1.6f), 0.9f, 40f);
+            BuildingBuilder.Silo(area, p, new Vector3(4.4f, 0f, -3.2f), 7.2f);
+            ZoneDressing.DressProductionYard(area, props, extras);
 
             FarmEnvironmentBuilder.Landmark(area, "Interact_Production", "area_production",
                 "Production Yard", FarmLandmark.LandmarkKind.Production,
                 new Vector3(0f, 0f, -2.6f), new Vector3(5f, 2.4f, 3f), layer);
         }
 
+        /// <summary>
+        /// Turns a placed visual prefab instance into a gameplay animal: the definition, the
+        /// habitat it belongs to and a stable save id. The controller and the interaction
+        /// component already come from the prefab; only the per-instance references are set here.
+        /// </summary>
+        private static void WireAnimal(
+            GameObject instance, AnimalDefinition definition, AnimalHabitat habitat,
+            string instanceId, int layer)
+        {
+            if (instance == null)
+            {
+                Debug.LogError("Little Farm Story: an animal prefab failed to instantiate; '" +
+                               instanceId + "' will be missing from the farm.");
+                return;
+            }
+
+            AnimalController controller = instance.GetComponent<AnimalController>();
+            if (controller == null)
+            {
+                Debug.LogError("Little Farm Story: '" + instance.name +
+                               "' has no AnimalController; the animal prefab is out of date.");
+                return;
+            }
+
+            controller.EditorConfigure(
+                definition, habitat, instance.GetComponent<AnimalIdleAnimator>(), instanceId);
+
+            if (layer >= 0)
+            {
+                // Only the root carries the trigger, so only the root needs the layer.
+                instance.layer = layer;
+            }
+
+            instance.name = definition != null ? definition.DisplayName + "_" + instanceId : instance.name;
+        }
+
         private static void BuildChickenArea(
             Transform parent, ProtoPalette p, int layer, PropLibrary.Props props,
-            GameObject chickenPrefab, Vector3 centre)
+            PropLibraryExtra.Extras extras, GameObject chickenPrefabA, GameObject chickenPrefabB,
+            AnimalDefinition definition, Vector3 centre)
         {
             Transform area = ProtoAssets.Empty("Area_Chicken", parent, centre).transform;
             Mesh box = StylizedMeshLibrary.ChamferBox(0.06f);
-            Mesh trim = StylizedMeshLibrary.ChamferBox(0.22f);
-            Mesh disc = StylizedMeshLibrary.Disc(16);
 
             ProtoAssets.MeshObject(box, "PenGround", area, new Vector3(0f, 0.045f, 0f),
                 new Vector3(12.5f, 0.09f, 9.5f), p.PathEdge, false);
 
-            ProtoAssets.MeshObject(disc, "ScratchPatch", area, new Vector3(-1.6f, 0.1f, -1.2f),
-                new Vector3(5.2f, 1f, 4.2f), p.Soil, false);
+            // Bare scratched earth where the birds work, with an irregular outline.
+            ProtoAssets.MeshObject(StylizedMeshLibrary.IrregularDisc(710, 14, 0.3f),
+                "ScratchPatch", area, new Vector3(-1.6f, 0.1f, -1.2f),
+                new Vector3(5.6f, 1f, 4.4f), p.Soil, false);
 
             FarmEnvironmentBuilder.FenceRect(area, p, "PenFence", Vector3.zero,
-                new Vector2(12f, 9f), 2.4f, 1.1f, 3.2f);
+                new Vector2(12f, 9f), 2.4f, 1.15f, 3.2f);
 
             BuildingBuilder.Coop(area, p, new Vector3(3.4f, 0f, 2.2f));
+            ZoneDressing.DressChickenRun(area, props, extras);
 
-            ProtoAssets.MeshObject(trim, "FeedTrough", area, new Vector3(-2.2f, 0.28f, -1.8f),
-                new Vector3(2.8f, 0.42f, 0.78f), p.Wood, false);
-            ProtoAssets.MeshObject(trim, "FeedGrain", area, new Vector3(-2.2f, 0.46f, -1.8f),
-                new Vector3(2.4f, 0.12f, 0.5f), p.WheatStraw, false);
-
-            ProtoAssets.MeshObject(disc, "WaterBowl", area, new Vector3(-3.9f, 0.12f, 0.5f),
-                new Vector3(1.0f, 1f, 1.0f), p.WaterShallow, false);
+            // The run is the habitat: it owns capacity, the walkable rectangle, and the single
+            // Update that ticks every bird inside it. The coop footprint is fenced off so the
+            // flock walks around the building instead of through it.
+            AnimalHabitat habitat = area.gameObject.AddComponent<AnimalHabitat>();
+            habitat.EditorConfigure(
+                "habitat_coop", AnimalType.Chicken, 8,
+                Vector2.zero, new Vector2(5.2f, 3.7f),
+                new[]
+                {
+                    new AnimalHabitat.ExclusionZone
+                    {
+                        Centre = new Vector2(3.4f, 2.2f),
+                        HalfExtents = new Vector2(2.4f, 2.1f)
+                    }
+                });
+            habitat.EditorConfigureDevelopmentSpeed(DevelopmentAnimalMultiplier, true, AnimalDiagnostics);
 
             Vector3[] spots =
             {
                 new Vector3(-1.3f, 0.09f, 1.7f), new Vector3(0.7f, 0.09f, -2.4f),
-                new Vector3(-3.3f, 0.09f, -2.7f), new Vector3(1.9f, 0.09f, 0.5f),
-                new Vector3(-0.4f, 0.09f, 3.0f)
+                new Vector3(-3.3f, 0.09f, -2.7f), new Vector3(0.4f, 0.09f, 2.6f),
+                new Vector3(-0.4f, 0.09f, 3.0f), new Vector3(2.6f, 0.09f, -1.4f)
             };
-            float[] yaws = { 35f, 150f, 250f, 300f, 80f };
+            float[] yaws = { 35f, 150f, 250f, 300f, 80f, 200f };
 
             for (int i = 0; i < spots.Length; i++)
             {
-                FarmEnvironmentBuilder.PlaceProp(chickenPrefab, area, spots[i], 1f, yaws[i]);
-            }
+                GameObject variant = (i % 3 == 1) ? chickenPrefabB : chickenPrefabA;
+                GameObject bird = FarmEnvironmentBuilder.PlaceProp(
+                    variant, area, spots[i], 0.94f + (i % 3) * 0.05f, yaws[i]);
 
-            FarmEnvironmentBuilder.PlaceProp(props.HayBale, area, new Vector3(4.6f, 0.09f, -2.8f), 0.55f, 20f);
+                WireAnimal(bird, definition, habitat, "chicken_" + i, layer);
+            }
 
             FarmEnvironmentBuilder.Landmark(area, "Interact_Chicken", "area_chicken",
                 "Chicken Coop", FarmLandmark.LandmarkKind.AnimalPen,
-                new Vector3(3.4f, 0f, -0.1f), new Vector3(4.5f, 2.2f, 3f), layer);
+                new Vector3(3.4f, 0f, -0.4f), new Vector3(4.5f, 2.2f, 3f), layer);
         }
 
         private static void BuildCowArea(
             Transform parent, ProtoPalette p, int layer, PropLibrary.Props props,
-            GameObject cowPrefab, Vector3 centre)
+            PropLibraryExtra.Extras extras, GameObject cowPrefab,
+            AnimalDefinition definition, Vector3 centre)
         {
             Transform area = ProtoAssets.Empty("Area_Cow", parent, centre).transform;
             Mesh box = StylizedMeshLibrary.ChamferBox(0.06f);
-            Mesh trim = StylizedMeshLibrary.ChamferBox(0.22f);
 
             ProtoAssets.MeshObject(box, "PenGround", area, new Vector3(0f, 0.045f, 0f),
                 new Vector3(15.5f, 0.09f, 11.5f), p.GrassDeep, false);
 
+            // Worn tracks where the herd walks to the trough.
+            ProtoAssets.MeshObject(StylizedMeshLibrary.IrregularDisc(720, 14, 0.28f),
+                "WornPatch", area, new Vector3(-1.2f, 0.1f, -3.0f),
+                new Vector3(6.4f, 1f, 3.4f), p.PathEdge, false);
+
             FarmEnvironmentBuilder.FenceRect(area, p, "PenFence", Vector3.zero,
-                new Vector2(15f, 11f), 2.6f, 1.35f, 3.4f);
+                new Vector2(15f, 11f), 2.6f, 1.4f, 3.4f);
 
-            BuildingBuilder.Barn(area, p, new Vector3(4.2f, 0f, 2.8f));
+            BuildingBuilder.Barn(area, p, new Vector3(3.4f, 0f, 2.2f));
+            ZoneDressing.DressCowPasture(area, props, extras);
 
-            ProtoAssets.MeshObject(trim, "Trough", area, new Vector3(-1.4f, 0.32f, -3.8f),
-                new Vector3(4.4f, 0.6f, 1.0f), p.Wood, false);
-            ProtoAssets.MeshObject(trim, "TroughWater", area, new Vector3(-1.4f, 0.56f, -3.8f),
-                new Vector3(4.0f, 0.1f, 0.7f), p.WaterShallow, false);
+            AnimalHabitat habitat = area.gameObject.AddComponent<AnimalHabitat>();
+            habitat.EditorConfigure(
+                "habitat_barn", AnimalType.Cow, 4,
+                Vector2.zero, new Vector2(6.4f, 4.5f),
+                new[]
+                {
+                    new AnimalHabitat.ExclusionZone
+                    {
+                        Centre = new Vector2(3.4f, 2.2f),
+                        HalfExtents = new Vector2(4.4f, 3.6f)
+                    }
+                });
+            habitat.EditorConfigureDevelopmentSpeed(DevelopmentAnimalMultiplier, true, AnimalDiagnostics);
 
-            FarmEnvironmentBuilder.PlaceProp(props.HayBale, area, new Vector3(-5.0f, 0.09f, 2.6f), 1f, 12f);
-            FarmEnvironmentBuilder.PlaceProp(props.HayBale, area, new Vector3(-5.0f, 0.09f, 0.9f), 1f, -20f);
-            FarmEnvironmentBuilder.PlaceProp(props.HayBale, area, new Vector3(-5.1f, 1.35f, 1.75f), 0.9f, 44f);
+            Vector3[] cowSpots =
+            {
+                new Vector3(-2.0f, 0.09f, -0.6f),
+                new Vector3(1.6f, 0.09f, -2.4f),
+                new Vector3(-2.6f, 0.09f, 2.6f)
+            };
+            float[] cowYaws = { 55f, 205f, 320f };
+            float[] cowScales = { 1f, 1f, 0.92f };
 
-            FarmEnvironmentBuilder.PlaceProp(cowPrefab, area, new Vector3(-2.0f, 0.09f, -0.6f), 1f, 55f);
-            FarmEnvironmentBuilder.PlaceProp(cowPrefab, area, new Vector3(1.6f, 0.09f, -2.4f), 1f, 205f);
-            FarmEnvironmentBuilder.PlaceProp(cowPrefab, area, new Vector3(-0.4f, 0.09f, 2.6f), 0.92f, 320f);
+            for (int i = 0; i < cowSpots.Length; i++)
+            {
+                GameObject cow = FarmEnvironmentBuilder.PlaceProp(
+                    cowPrefab, area, cowSpots[i], cowScales[i], cowYaws[i]);
+
+                WireAnimal(cow, definition, habitat, "cow_" + i, layer);
+            }
 
             FarmEnvironmentBuilder.Landmark(area, "Interact_Cow", "area_cow",
                 "Cow Barn", FarmLandmark.LandmarkKind.AnimalPen,
-                new Vector3(4.2f, 0f, -0.6f), new Vector3(5f, 2.4f, 3.2f), layer);
+                new Vector3(3.4f, 0f, -1.2f), new Vector3(5f, 2.4f, 3.2f), layer);
         }
 
         private static void BuildMarketArea(
-            Transform parent, ProtoPalette p, int layer, PropLibrary.Props props, Vector3 centre)
+            Transform parent, ProtoPalette p, int layer, PropLibrary.Props props,
+            PropLibraryExtra.Extras extras, Vector3 centre)
         {
             Transform area = ProtoAssets.Empty("Area_Market", parent, centre).transform;
             Mesh box = StylizedMeshLibrary.ChamferBox(0.06f);
-            Mesh disc = StylizedMeshLibrary.Disc(20);
 
             ProtoAssets.MeshObject(box, "Plaza", area, new Vector3(0f, 0.04f, 0f),
                 new Vector3(12.5f, 0.08f, 11.5f), p.Path, false);
-            ProtoAssets.MeshObject(disc, "PlazaInlay", area, new Vector3(0f, 0.09f, 0.6f),
-                new Vector3(8.4f, 1f, 8.4f), p.PathEdge, false);
+            ProtoAssets.MeshObject(StylizedMeshLibrary.IrregularDisc(730, 18, 0.14f),
+                "PlazaInlay", area, new Vector3(0f, 0.09f, 0.6f),
+                new Vector3(8.8f, 1f, 8.8f), p.PathEdge, false);
 
             BuildingBuilder.MarketStall(area, p, new Vector3(0f, 0f, 1.4f));
+            ZoneDressing.DressMarket(area, props, extras);
 
-            FarmEnvironmentBuilder.PlaceProp(props.Crate, area, new Vector3(-4.6f, 0.06f, -2.6f), 1.1f, 22f);
-            FarmEnvironmentBuilder.PlaceProp(props.Crate, area, new Vector3(-4.2f, 0.06f, -3.6f), 0.9f, -35f);
-            FarmEnvironmentBuilder.PlaceProp(props.Barrel, area, new Vector3(4.6f, 0.06f, -2.8f), 1f, 0f);
-            FarmEnvironmentBuilder.PlaceProp(props.Flowers, area, new Vector3(5.2f, 0.06f, 2.0f), 1.3f, 0f);
-            FarmEnvironmentBuilder.PlaceProp(props.Flowers, area, new Vector3(-5.4f, 0.06f, 1.4f), 1.2f, 60f);
+            BuildMarketLandmark(area, "Interact_Market", "area_market", "Shop",
+                new Vector3(0f, 0f, -3.1f), new Vector3(8f, 2.4f, 3f), layer);
+        }
 
-            FarmEnvironmentBuilder.Landmark(area, "Interact_Market", "area_market",
-                "Farmers Market", FarmLandmark.LandmarkKind.Market,
-                new Vector3(0f, 0f, -2.9f), new Vector3(8f, 2.4f, 3f), layer);
+        /// <summary>
+        /// The market's physical entrance - same trigger, same position every other landmark
+        /// would get from <see cref="FarmEnvironmentBuilder.Landmark"/> - wired to a
+        /// <see cref="MarketInteractable"/> instead of the generic <see cref="FarmLandmark"/>,
+        /// since the market is the one landmark that now does something more than log a
+        /// placeholder message. Every other landmark (Home, Production, Field) is untouched.
+        /// </summary>
+        private static MarketInteractable BuildMarketLandmark(
+            Transform parent, string objectName, string id, string label,
+            Vector3 position, Vector3 triggerSize, int layer)
+        {
+            GameObject go = ProtoAssets.Empty(objectName, parent, position);
+            if (layer >= 0)
+            {
+                go.layer = layer;
+            }
+
+            BoxCollider trigger = go.AddComponent<BoxCollider>();
+            trigger.isTrigger = true;
+            trigger.size = triggerSize;
+            trigger.center = new Vector3(0f, triggerSize.y * 0.5f, 0f);
+
+            MarketInteractable market = go.AddComponent<MarketInteractable>();
+            market.EditorConfigure(id, label);
+            return market;
         }
 
         private static void BuildHomeArea(
-            Transform parent, ProtoPalette p, int layer, PropLibrary.Props props, Vector3 centre)
+            Transform parent, ProtoPalette p, int layer, PropLibrary.Props props,
+            PropLibraryExtra.Extras extras, Vector3 centre)
         {
             Transform area = ProtoAssets.Empty("Area_Home", parent, centre).transform;
             Mesh box = StylizedMeshLibrary.ChamferBox(0.06f);
-            Mesh disc = StylizedMeshLibrary.Disc(16);
 
             ProtoAssets.MeshObject(box, "Yard", area, new Vector3(0f, 0.03f, 0f),
-                new Vector3(12f, 0.06f, 11f), p.GrassLight, false);
+                new Vector3(12.5f, 0.06f, 11.5f), p.GrassLight, false);
 
-            ProtoAssets.MeshObject(disc, "FrontPath", area, new Vector3(0f, 0.07f, -4.2f),
-                new Vector3(4.4f, 1f, 4.4f), p.Path, false);
+            ProtoAssets.MeshObject(StylizedMeshLibrary.IrregularDisc(740, 14, 0.2f),
+                "FrontPath", area, new Vector3(1.9f, 0.07f, -5.0f),
+                new Vector3(5.0f, 1f, 4.6f), p.Path, false);
 
-            BuildingBuilder.Farmhouse(area, p, new Vector3(0f, 0f, 1.6f));
-
-            FarmEnvironmentBuilder.PlaceProp(props.BushLarge, area, new Vector3(-3.4f, 0.05f, -3.2f), 1f, 30f);
-            FarmEnvironmentBuilder.PlaceProp(props.BushLarge, area, new Vector3(3.4f, 0.05f, -3.2f), 1.05f, -50f);
-            FarmEnvironmentBuilder.PlaceProp(props.BushSmall, area, new Vector3(-4.6f, 0.05f, -1.6f), 1f, 12f);
-            FarmEnvironmentBuilder.PlaceProp(props.Flowers, area, new Vector3(-2.2f, 0.05f, -4.4f), 1.2f, 0f);
-            FarmEnvironmentBuilder.PlaceProp(props.Flowers, area, new Vector3(2.2f, 0.05f, -4.4f), 1.15f, 90f);
-            FarmEnvironmentBuilder.PlaceProp(props.TreeRound, area, new Vector3(5.0f, 0.05f, 1.2f), 0.9f, 0f);
-            FarmEnvironmentBuilder.PlaceProp(props.Barrel, area, new Vector3(-4.8f, 0.05f, 2.4f), 0.95f, 15f);
+            BuildingBuilder.Farmhouse(area, p, new Vector3(0f, 0f, 2.2f));
+            ZoneDressing.DressHome(area, props, extras);
 
             FarmEnvironmentBuilder.Landmark(area, "Interact_Home", "area_home",
                 "Farmhouse", FarmLandmark.LandmarkKind.Home,
-                new Vector3(0f, 0f, -3.2f), new Vector3(5f, 2.4f, 2.6f), layer);
-        }
-
-        // ================================================================ decoration
-
-        private static void BuildDecoration(Transform parent, ProtoPalette p, PropLibrary.Props props)
-        {
-            // ---- treeline just inside the fence, framing the farm
-            Vector3[] treePositions =
-            {
-                new Vector3(-28.5f, 0f, 28f), new Vector3(-22f, 0f, 29f), new Vector3(-29f, 0f, 21f),
-                new Vector3(28.5f, 0f, 28.5f), new Vector3(22f, 0f, 29.5f), new Vector3(29f, 0f, 22f),
-                new Vector3(-29f, 0f, -28f), new Vector3(-23f, 0f, -29f), new Vector3(29f, 0f, -29f),
-                new Vector3(23f, 0f, -29.5f), new Vector3(-29.5f, 0f, 1.5f), new Vector3(29.5f, 0f, 1.5f),
-                new Vector3(-9.5f, 0f, 28.5f), new Vector3(10f, 0f, 28f), new Vector3(-9f, 0f, -29f),
-                new Vector3(9.5f, 0f, -29f), new Vector3(-25f, 0f, 12f), new Vector3(25.5f, 0f, 12.5f),
-                new Vector3(-25.5f, 0f, -1.5f), new Vector3(25.5f, 0f, -1.5f)
-            };
-
-            int[] treeKinds = { 0, 1, 0, 1, 0, 2, 0, 1, 0, 2, 1, 0, 0, 2, 1, 0, 2, 0, 1, 2 };
-
-            for (int i = 0; i < treePositions.Length; i++)
-            {
-                GameObject prefab = treeKinds[i] == 0 ? props.TreeRound
-                    : treeKinds[i] == 1 ? props.TreeTall
-                    : props.TreeYoung;
-
-                FarmEnvironmentBuilder.PlaceProp(
-                    prefab, parent, treePositions[i], 0.86f + (i % 4) * 0.08f, i * 63f % 360f);
-            }
-
-            // ---- distant treeline outside the fence, softened by the fog
-            for (int i = 0; i < 22; i++)
-            {
-                float angle = i / 22f * Mathf.PI * 2f + 0.35f;
-                float radius = 40f + (i % 3) * 4.5f;
-                Vector3 pos = new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
-
-                GameObject prefab = (i % 2 == 0) ? props.TreeTall : props.TreeRound;
-                FarmEnvironmentBuilder.PlaceProp(prefab, parent, pos, 1.15f + (i % 4) * 0.1f, i * 37f % 360f);
-            }
-
-            // ---- bushes softening the path edges and zone corners
-            Vector3[] bushes =
-            {
-                new Vector3(-8.2f, 0f, 24f), new Vector3(8.2f, 0f, 24f),
-                new Vector3(-8.2f, 0f, -13.5f), new Vector3(8.2f, 0f, -13.5f),
-                new Vector3(-5.2f, 0f, 11f), new Vector3(5.2f, 0f, 11f),
-                new Vector3(-5.2f, 0f, -11f), new Vector3(5.2f, 0f, -11f),
-                new Vector3(-26f, 0f, -3f), new Vector3(26f, 0f, -3f),
-                new Vector3(-13f, 0f, 27.5f), new Vector3(13.5f, 0f, 27.5f),
-                new Vector3(-24.5f, 0f, -27f), new Vector3(24.5f, 0f, -27.5f)
-            };
-
-            for (int i = 0; i < bushes.Length; i++)
-            {
-                GameObject prefab = (i % 3 == 0) ? props.BushSmall : props.BushLarge;
-                FarmEnvironmentBuilder.PlaceProp(prefab, parent, bushes[i], 0.9f + (i % 3) * 0.16f, i * 53f % 360f);
-            }
-
-            // ---- flowers along the plaza and the main avenue
-            Vector3[] flowers =
-            {
-                new Vector3(-4.4f, 0f, 4.4f), new Vector3(4.4f, 0f, 4.4f),
-                new Vector3(-4.4f, 0f, -4.4f), new Vector3(4.4f, 0f, -4.4f),
-                new Vector3(-3.6f, 0f, 13f), new Vector3(3.6f, 0f, 13f),
-                new Vector3(-3.6f, 0f, -16f), new Vector3(3.6f, 0f, -16f),
-                new Vector3(-20f, 0f, 25.5f), new Vector3(20f, 0f, 25.5f)
-            };
-
-            for (int i = 0; i < flowers.Length; i++)
-            {
-                FarmEnvironmentBuilder.PlaceProp(
-                    props.Flowers, parent, flowers[i], 1.1f + (i % 3) * 0.15f, i * 71f % 360f);
-            }
-
-            // ---- rocks
-            FarmEnvironmentBuilder.PlaceProp(props.Rock, parent, new Vector3(-11.5f, 0f, 25f), 1f, 20f);
-            FarmEnvironmentBuilder.PlaceProp(props.RockSmall, parent, new Vector3(-10.4f, 0f, 24f), 1f, -40f);
-            FarmEnvironmentBuilder.PlaceProp(props.Rock, parent, new Vector3(12.5f, 0f, -25f), 0.9f, 130f);
-            FarmEnvironmentBuilder.PlaceProp(props.Rock, parent, new Vector3(-27.5f, 0f, 6f), 1.2f, 70f);
-            FarmEnvironmentBuilder.PlaceProp(props.RockSmall, parent, new Vector3(27f, 0f, 17f), 1f, 250f);
-
-            // ---- pond
-            FarmEnvironmentBuilder.Pond(parent, p, PondCentre, 4.6f, props);
-
-            // ---- crossroads signpost: the visual anchor of the player's start area
-            BuildCrossroadsSign(parent, p);
-        }
-
-        private static void BuildCrossroadsSign(Transform parent, ProtoPalette p)
-        {
-            Transform sign = ProtoAssets.Empty("Crossroads_Signpost", parent, new Vector3(4.4f, 0f, 4.4f)).transform;
-
-            Mesh box = StylizedMeshLibrary.ChamferBox(0.18f);
-            Mesh taper = StylizedMeshLibrary.Tapered(0.8f);
-            Mesh cone = StylizedMeshLibrary.Cone(8);
-
-            GameObject post = ProtoAssets.MeshObject(taper, "Post", sign, new Vector3(0f, 1.5f, 0f),
-                new Vector3(0.26f, 3.0f, 0.26f), p.Wood, true);
-            post.AddComponent<BoxCollider>();
-
-            ProtoAssets.MeshObject(cone, "Finial", sign, new Vector3(0f, 3.18f, 0f),
-                new Vector3(0.34f, 0.36f, 0.34f), p.RoofTerracotta, false);
-
-            // Four painted arms, each pointing towards a quadrant of the farm.
-            Material[] armColors = { p.Wheat, p.Tomato, p.RoofTeal, p.Amber };
-            float[] armYaw = { 0f, 90f, 180f, 270f };
-            float[] armHeight = { 2.6f, 2.2f, 1.8f, 1.4f };
-
-            for (int i = 0; i < 4; i++)
-            {
-                Quaternion rotation = Quaternion.Euler(0f, armYaw[i], 0f);
-
-                GameObject arm = ProtoAssets.MeshObject(box, "Arm_" + i, sign,
-                    rotation * new Vector3(0.85f, 0f, 0f) + new Vector3(0f, armHeight[i], 0f),
-                    new Vector3(1.7f, 0.3f, 0.12f), armColors[i], false);
-
-                arm.transform.localRotation = rotation;
-            }
+                new Vector3(1.9f, 0f, -3.4f), new Vector3(5f, 2.4f, 2.6f), layer);
         }
 
         // ================================================================ actors
 
-        private static GameObject BuildPlayer(Transform parent, ProtoPalette p)
+        private static GameObject BuildPlayer(
+            Transform parent, ProtoPalette p, GameObject farmerPrefab,
+            EconomySettings economySettings, ShopDefinition shopDefinition)
         {
             GameObject player = ProtoAssets.Empty("Player", parent, new Vector3(0f, 0.2f, -6f));
 
@@ -665,12 +1356,23 @@ namespace LittleFarmStory.EditorTools
             controller.stepOffset = 0.4f;
             controller.skinWidth = 0.03f;
 
-            // Visual is rotated by PlayerController; BobRoot is animated by PlayerVisualBob.
-            // Separating them means the two never write to the same transform property.
+            // Three writers, three disjoint transform sets, so nothing ever fights:
+            //   PlayerController    -> Visual.rotation        (facing)
+            //   PlayerVisualBob     -> BobRoot local TRS      (body bob)
+            //   FarmerLimbAnimator  -> the rig's joint rotations only
             Transform visual = ProtoAssets.Empty("Visual", player.transform, Vector3.zero).transform;
             Transform bobRoot = ProtoAssets.Empty("BobRoot", visual, Vector3.zero).transform;
 
-            CharacterBuilder.BuildFarmer(bobRoot, p);
+            if (farmerPrefab != null)
+            {
+                GameObject farmer = (GameObject)PrefabUtility.InstantiatePrefab(farmerPrefab, bobRoot);
+                farmer.transform.localPosition = Vector3.zero;
+                farmer.transform.localRotation = Quaternion.identity;
+            }
+            else
+            {
+                Debug.LogError("Little Farm Story: the Farmer prefab is missing; the player will be invisible.");
+            }
 
             // Soft contact shadow: cheaper and more readable than relying on the sun alone.
             ProtoAssets.MeshObject(StylizedMeshLibrary.Disc(14), "ContactShadow", visual,
@@ -680,8 +1382,28 @@ namespace LittleFarmStory.EditorTools
             player.AddComponent<KeyboardMoveInputSource>();
             PlayerController movement = player.AddComponent<PlayerController>();
             player.AddComponent<InteractionController>();
-            player.AddComponent<PlayerInventory>();
-            player.AddComponent<ActionFeedbackChannel>();
+            PlayerInventory inventory = player.AddComponent<PlayerInventory>();
+            ActionFeedbackChannel feedbackChannel = player.AddComponent<ActionFeedbackChannel>();
+
+            // Coins are per-player runtime state, so the wallet lives here beside the inventory
+            // rather than in an asset. The manager owns no state of its own; it just runs
+            // transactions against these two.
+            CurrencyWallet wallet = player.AddComponent<CurrencyWallet>();
+            wallet.EditorConfigure(economySettings != null ? economySettings.StartingCoins : 100);
+
+            EconomyManager economy = player.AddComponent<EconomyManager>();
+            economy.EditorConfigure(shopDefinition, economySettings, wallet, inventory, feedbackChannel);
+
+            // Starting stock. Seeds drive the farming loop; the wheat and corn exist so the
+            // animal feeding loop is testable from a cold start, before the first harvest.
+            WireStartingItems(inventory, new[]
+            {
+                new KeyValuePair<string, int>(ItemIds.Seed("wheat"), 10),
+                new KeyValuePair<string, int>(ItemIds.Harvest("wheat"), 6),
+                new KeyValuePair<string, int>(ItemIds.Harvest("corn"), 4),
+                new KeyValuePair<string, int>(ItemIds.Egg, 0),
+                new KeyValuePair<string, int>(ItemIds.Milk, 0)
+            });
 
             PlayerVisualBob bob = bobRoot.gameObject.AddComponent<PlayerVisualBob>();
             Wire(bob, "player", movement);
@@ -696,13 +1418,13 @@ namespace LittleFarmStory.EditorTools
 
             Camera cam = go.AddComponent<Camera>();
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.backgroundColor = ProtoPalette.Hex("CFE3E8");
+            cam.backgroundColor = ProtoPalette.Hex("D3E6EA");
 
             // Narrow field of view plus a long distance gives the flatter, near-isometric
             // read of a polished mobile farm game, and keeps a whole field on a portrait screen.
-            cam.fieldOfView = 42f;
+            cam.fieldOfView = 40f;
             cam.nearClipPlane = 0.5f;
-            cam.farClipPlane = 140f;
+            cam.farClipPlane = 190f;
             cam.allowHDR = false;
             cam.allowMSAA = false;
             cam.useOcclusionCulling = true;
@@ -716,229 +1438,110 @@ namespace LittleFarmStory.EditorTools
             return controller;
         }
 
-        // ================================================================ HUD
-
-        private class HudReferences
+        /// <summary>
+        /// Hangs a small world-space badge over a plot or an animal. It self-wires to whichever
+        /// gameplay component sits above it, so this only has to build the geometry.
+        /// </summary>
+        private static void AttachReadyMarker(Transform parent, string iconName, float height)
         {
-            public HudController Hud;
-            public MobileJoystick Joystick;
-            public VirtualButton ActionButton;
-            public Text CoinLabel;
-            public Text LevelLabel;
-            public Text PromptLabel;
-            public GameObject PromptRoot;
-            public GameObject ActionRoot;
-            public Button MenuButton;
-            public Text SeedLabel;
-            public Text ProduceLabel;
-            public Text MessageLabel;
-            public GameObject MessageRoot;
-        }
+            Sprite icon = UiIconLibrary.Get(iconName);
 
-        private static HudReferences BuildHud(Transform parent)
-        {
-            Sprite circle = ProtoAssets.CircleSprite("UI_Circle");
-            Sprite ring = ProtoAssets.CircleSprite("UI_Ring", 160, 0.78f);
-            Sprite panel = ProtoAssets.OutlinedBoxSprite("UI_PanelOutlined", 96, 30, 5);
-            Sprite plain = ProtoAssets.RoundedBoxSprite("UI_Panel");
-
-            GameObject canvasGo = new GameObject("HUD_Canvas",
-                typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasGo.layer = LayerMask.NameToLayer("UI");
-            canvasGo.transform.SetParent(parent, false);
-
-            Canvas canvas = canvasGo.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-
-            CanvasScaler scaler = canvasGo.GetComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1080f, 1920f);
-            scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
-            scaler.matchWidthOrHeight = 0.5f;
-
-            Transform canvasRoot = canvasGo.transform;
-            HudReferences refs = new HudReferences();
-
-            BuildMenuButton(canvasRoot, circle, refs);
-            BuildStatusPills(canvasRoot, panel, circle, refs);
-            BuildJoystick(canvasRoot, circle, ring, refs);
-            BuildActionButton(canvasRoot, circle, refs);
-            BuildPromptAndMessage(canvasRoot, panel, plain, refs);
-
-            refs.Hud = canvasGo.AddComponent<HudController>();
-            return refs;
-        }
-
-        private static void BuildMenuButton(Transform canvasRoot, Sprite circle, HudReferences refs)
-        {
-            Image menuBg = ProtoUi.Sprite("MenuButton", canvasRoot, circle, ProtoUi.Panel, true);
-            ProtoUi.AnchorCorner(menuBg.rectTransform, new Vector2(0f, 1f),
-                new Vector2(146f, 146f), new Vector2(44f, 44f));
-            ProtoUi.AddShadowBehind(menuBg, 8f, 6f);
-
-            Image menuInner = ProtoUi.Sprite("Inner", menuBg.transform, circle, ProtoUi.PanelDim);
-            ProtoUi.Centre(menuInner.rectTransform, new Vector2(116f, 116f));
-
-            // Three bars: a hamburger drawn from primitives rather than an icon font.
-            for (int i = 0; i < 3; i++)
+            if (icon == null)
             {
-                Image bar = ProtoUi.Sprite("Bar_" + i, menuBg.transform, null, ProtoUi.Ink);
-                ProtoUi.Centre(bar.rectTransform, new Vector2(58f, 9f));
-                bar.rectTransform.anchoredPosition = new Vector2(0f, 20f - i * 20f);
+                Debug.LogError("Little Farm Story: ready-marker icon '" + iconName + "' is missing.");
+                return;
             }
 
-            refs.MenuButton = menuBg.gameObject.AddComponent<Button>();
-            refs.MenuButton.targetGraphic = menuBg;
+            GameObject root = ProtoAssets.Empty("ReadyMarker", parent, new Vector3(0f, height, 0f));
 
-            ColorBlock colors = refs.MenuButton.colors;
-            colors.pressedColor = ProtoUi.PanelDim;
-            colors.fadeDuration = 0.06f;
-            refs.MenuButton.colors = colors;
+            GameObject badgeGo = new GameObject("Badge");
+            badgeGo.transform.SetParent(root.transform, false);
+            badgeGo.transform.localScale = Vector3.one * 0.75f;
+
+            SpriteRenderer badge = badgeGo.AddComponent<SpriteRenderer>();
+            badge.sprite = icon;
+            badge.sortingOrder = 100;
+
+            ReadyMarker marker = root.AddComponent<ReadyMarker>();
+            marker.EditorConfigure(badge, 0.12f, 0.85f);
         }
 
-        private static void BuildStatusPills(
-            Transform canvasRoot, Sprite panel, Sprite circle, HudReferences refs)
-        {
-            refs.CoinLabel = Pill(canvasRoot, panel, circle, "CoinPill", "Coins", ProtoUi.Coin, 44f, "250");
-            refs.LevelLabel = Pill(canvasRoot, panel, circle, "LevelPill", "Level", ProtoUi.Leaf, 168f, "1");
-            refs.SeedLabel = Pill(canvasRoot, panel, circle, "SeedPill", "Wheat Seeds", ProtoUi.Seed, 292f, "0");
-            refs.ProduceLabel = Pill(canvasRoot, panel, circle, "ProducePill", "Wheat", ProtoPalette.WheatAccent, 416f, "0");
-        }
+        // ================================================================ HUD data
 
         /// <summary>
-        /// One status pill: shadow, outlined panel, coloured icon disc, caption and value.
-        /// Widths are fixed so the caption and value can never collide.
+        /// What the HUD is allowed to display, in display order. Ids come from the crop and
+        /// animal assets rather than from string literals, so renaming one cannot silently
+        /// desync the readout from the inventory.
+        ///
+        /// Only the resources the player spends constantly are pinned to the permanent HUD;
+        /// the rest are one tap away in the storage sheet. A farming game that shows every
+        /// counter at all times stops being a game about a farm and becomes a spreadsheet.
         /// </summary>
-        private static Text Pill(
-            Transform canvasRoot, Sprite panel, Sprite circle,
-            string objectName, string caption, Color iconColor, float topMargin, string initialValue)
+        private static HudBuilder.ResourceEntry[] BuildResourceTable(
+            CropDefinition wheat, CropDefinition corn,
+            AnimalDefinition chicken, AnimalDefinition cow)
         {
-            const float width = 372f;
-            const float height = 108f;
+            List<HudBuilder.ResourceEntry> entries = new List<HudBuilder.ResourceEntry>();
 
-            Image pill = ProtoUi.Sprite(objectName, canvasRoot, panel, ProtoUi.Panel);
-            ProtoUi.AnchorCorner(pill.rectTransform, new Vector2(1f, 1f),
-                new Vector2(width, height), new Vector2(44f, topMargin));
-            ProtoUi.AddShadowBehind(pill, 7f, 6f);
+            if (wheat != null)
+            {
+                entries.Add(new HudBuilder.ResourceEntry
+                {
+                    ItemId = wheat.SeedItemId,
+                    DisplayName = wheat.DisplayName + " Seeds",
+                    IconName = UiIconLibrary.Names.Seed,
+                    Pinned = true
+                });
 
-            Image iconRing = ProtoUi.Sprite("IconRing", pill.transform, circle, ProtoUi.PanelDim);
-            ProtoUi.AnchorCorner(iconRing.rectTransform, new Vector2(0f, 0.5f),
-                new Vector2(76f, 76f), new Vector2(16f, 0f));
-            iconRing.rectTransform.anchoredPosition = new Vector2(16f, 0f);
+                entries.Add(new HudBuilder.ResourceEntry
+                {
+                    ItemId = wheat.HarvestItemId,
+                    DisplayName = wheat.DisplayName,
+                    IconName = UiIconLibrary.Names.Wheat,
+                    Pinned = true
+                });
+            }
 
-            Image icon = ProtoUi.Sprite("Icon", iconRing.transform, circle, iconColor);
-            ProtoUi.Centre(icon.rectTransform, new Vector2(58f, 58f));
+            if (corn != null)
+            {
+                entries.Add(new HudBuilder.ResourceEntry
+                {
+                    ItemId = corn.HarvestItemId,
+                    DisplayName = corn.DisplayName,
+                    IconName = UiIconLibrary.Names.Corn,
+                    Pinned = false
+                });
+            }
 
-            Text captionLabel = ProtoUi.Label("Caption", pill.transform, caption, 25, TextAnchor.MiddleLeft);
-            captionLabel.color = new Color(ProtoUi.Ink.r, ProtoUi.Ink.g, ProtoUi.Ink.b, 0.72f);
-            ProtoUi.AnchorCorner(captionLabel.rectTransform, new Vector2(0f, 0.5f),
-                new Vector2(150f, 60f), new Vector2(104f, 0f));
-            captionLabel.rectTransform.anchoredPosition = new Vector2(104f, 0f);
+            if (chicken != null)
+            {
+                entries.Add(new HudBuilder.ResourceEntry
+                {
+                    ItemId = chicken.ProductItemId,
+                    DisplayName = "Eggs",
+                    IconName = UiIconLibrary.Names.Egg,
+                    Pinned = false
+                });
+            }
 
-            Text value = ProtoUi.Label("Value", pill.transform, initialValue, 42, TextAnchor.MiddleRight);
-            ProtoUi.AnchorCorner(value.rectTransform, new Vector2(1f, 0.5f),
-                new Vector2(102f, 70f), new Vector2(22f, 0f));
-            value.rectTransform.anchoredPosition = new Vector2(-22f, 0f);
+            if (cow != null)
+            {
+                entries.Add(new HudBuilder.ResourceEntry
+                {
+                    ItemId = cow.ProductItemId,
+                    DisplayName = "Milk",
+                    IconName = UiIconLibrary.Names.Milk,
+                    Pinned = false
+                });
+            }
 
-            return value;
-        }
-
-        private static void BuildJoystick(
-            Transform canvasRoot, Sprite circle, Sprite ring, HudReferences refs)
-        {
-            // Large invisible touch zone: the stick snaps to wherever the thumb lands.
-            Image zone = ProtoUi.Sprite("JoystickZone", canvasRoot, null, new Color(0f, 0f, 0f, 0f), true);
-            zone.rectTransform.anchorMin = new Vector2(0f, 0f);
-            zone.rectTransform.anchorMax = new Vector2(0.62f, 0.4f);
-            zone.rectTransform.offsetMin = Vector2.zero;
-            zone.rectTransform.offsetMax = Vector2.zero;
-
-            Image stickBg = ProtoUi.Sprite("Background", zone.transform, ring, new Color(1f, 1f, 1f, 0.62f));
-            ProtoUi.Centre(stickBg.rectTransform, new Vector2(380f, 380f));
-            stickBg.rectTransform.anchoredPosition = new Vector2(0f, -20f);
-
-            CanvasGroup stickGroup = stickBg.gameObject.AddComponent<CanvasGroup>();
-            stickGroup.blocksRaycasts = false;
-            stickGroup.interactable = false;
-
-            // Darkened track inside the ring lifts the thumb off bright grass.
-            Image track = ProtoUi.Sprite("Track", stickBg.transform, circle, new Color(0.16f, 0.12f, 0.08f, 0.16f));
-            ProtoUi.Centre(track.rectTransform, new Vector2(320f, 320f));
-
-            Image handle = ProtoUi.Sprite("Handle", stickBg.transform, circle, new Color(1f, 1f, 1f, 0.92f));
-            ProtoUi.Centre(handle.rectTransform, new Vector2(166f, 166f));
-
-            Image handleRim = ProtoUi.Sprite("HandleRim", handle.transform, circle, ProtoUi.Accent);
-            ProtoUi.Centre(handleRim.rectTransform, new Vector2(78f, 78f));
-
-            refs.Joystick = zone.gameObject.AddComponent<MobileJoystick>();
-            Wire(refs.Joystick, "background", stickBg.rectTransform);
-            Wire(refs.Joystick, "handle", handle.rectTransform);
-            Wire(refs.Joystick, "visuals", stickGroup);
-        }
-
-        private static void BuildActionButton(Transform canvasRoot, Sprite circle, HudReferences refs)
-        {
-            // Outer disc is the button body; the inner face is what scales on press.
-            Image outer = ProtoUi.Sprite("ActionButton", canvasRoot, circle, ProtoUi.AccentDeep, true);
-            ProtoUi.AnchorCorner(outer.rectTransform, new Vector2(1f, 0f),
-                new Vector2(258f, 258f), new Vector2(52f, 104f));
-            ProtoUi.AddShadowBehind(outer, 10f, 8f);
-
-            CanvasGroup actionGroup = outer.gameObject.AddComponent<CanvasGroup>();
-
-            Image face = ProtoUi.Sprite("Face", outer.transform, circle, ProtoUi.Accent);
-            ProtoUi.Centre(face.rectTransform, new Vector2(214f, 214f));
-
-            // Top highlight sells the button as a physical, pressable dome.
-            Image gloss = ProtoUi.Sprite("Gloss", face.transform, circle, new Color(1f, 1f, 1f, 0.22f));
-            ProtoUi.Centre(gloss.rectTransform, new Vector2(168f, 168f));
-            gloss.rectTransform.anchoredPosition = new Vector2(0f, 22f);
-
-            Text actionText = ProtoUi.OutlinedLabel("Label", face.transform, "USE", 56, TextAnchor.MiddleCenter, 2.5f);
-            actionText.color = ProtoUi.InkLight;
-            ProtoUi.Stretch(actionText.rectTransform, Vector2.zero, Vector2.one);
-
-            refs.ActionButton = outer.gameObject.AddComponent<VirtualButton>();
-            Wire(refs.ActionButton, "visuals", actionGroup);
-            Wire(refs.ActionButton, "scaleTarget", face.rectTransform);
-
-            refs.ActionRoot = outer.gameObject;
-        }
-
-        private static void BuildPromptAndMessage(
-            Transform canvasRoot, Sprite panel, Sprite plain, HudReferences refs)
-        {
-            // Contextual prompt, sitting above the action button.
-            Image prompt = ProtoUi.Sprite("PromptPanel", canvasRoot, panel, ProtoUi.Panel);
-            ProtoUi.AnchorCorner(prompt.rectTransform, new Vector2(0.5f, 0f),
-                new Vector2(680f, 122f), new Vector2(0f, 396f));
-            prompt.rectTransform.anchoredPosition = new Vector2(0f, 396f);
-            ProtoUi.AddShadowBehind(prompt, 7f, 6f);
-
-            refs.PromptLabel = ProtoUi.Label("Label", prompt.transform, "", 44, TextAnchor.MiddleCenter);
-            ProtoUi.Stretch(refs.PromptLabel.rectTransform, Vector2.zero, Vector2.one);
-            refs.PromptRoot = prompt.gameObject;
-
-            // Transient action toast, higher up so it never covers the prompt.
-            Image message = ProtoUi.Sprite("MessagePanel", canvasRoot, plain, ProtoPalette.Hex("3A2E22"));
-            message.color = new Color(message.color.r, message.color.g, message.color.b, 0.88f);
-            ProtoUi.AnchorCorner(message.rectTransform, new Vector2(0.5f, 0f),
-                new Vector2(700f, 104f), new Vector2(0f, 556f));
-            message.rectTransform.anchoredPosition = new Vector2(0f, 556f);
-
-            refs.MessageLabel = ProtoUi.Label("Label", message.transform, "", 42, TextAnchor.MiddleCenter);
-            refs.MessageLabel.color = ProtoUi.InkLight;
-            ProtoUi.Stretch(refs.MessageLabel.rectTransform, Vector2.zero, Vector2.one);
-
-            refs.MessageRoot = message.gameObject;
-            message.gameObject.SetActive(false);
+            return entries.ToArray();
         }
 
         // ================================================================ wiring
 
         private static void WireEverything(
-            GameObject player, FarmCameraController cameraController, HudReferences hud,
+            GameObject player, FarmCameraController cameraController, HudBuilder.Result hud,
             int layer, CropDefinition primaryCrop)
         {
             PlayerInputProvider provider = player.GetComponent<PlayerInputProvider>();
@@ -956,67 +1559,50 @@ namespace LittleFarmStory.EditorTools
 
             Wire(interaction, "input", provider);
             WireInt(interaction, "interactableLayers", layer >= 0 ? 1 << layer : ~0);
+            WireBool(interaction, "logInteractions", InteractionDiagnostics);
 
+            // Off until the automated gameplay test passes with it on. A missed interaction is
+            // a far worse bug than being able to reach through a wall.
+            WireBool(interaction, "requireLineOfSight", false);
+
+            // The HUD's own widgets were wired when it was built - including the coin display,
+            // which HudBuilder binds straight to the player's CurrencyWallet since that wallet
+            // already exists by the time HudBuilder.Build runs. Only the gameplay sources the
+            // HUD observes but did not create are connected here. It reads them and never
+            // writes to them.
             Wire(hud.Hud, "interaction", interaction);
-            Wire(hud.Hud, "coinLabel", hud.CoinLabel);
-            Wire(hud.Hud, "xpLabel", hud.LevelLabel);
-            Wire(hud.Hud, "promptLabel", hud.PromptLabel);
-            Wire(hud.Hud, "promptRoot", hud.PromptRoot);
-            Wire(hud.Hud, "actionButtonRoot", hud.ActionRoot);
-            Wire(hud.Hud, "menuButton", hud.MenuButton);
-
             Wire(hud.Hud, "inventory", inventory);
             Wire(hud.Hud, "feedback", feedbackChannel);
-            Wire(hud.Hud, "messageLabel", hud.MessageLabel);
-            Wire(hud.Hud, "messageRoot", hud.MessageRoot);
-            WireInventoryCounters(hud.Hud, primaryCrop, hud.SeedLabel, hud.ProduceLabel);
 
             cameraController.SnapToTarget();
         }
 
         /// <summary>
-        /// Binds the HUD counters to item ids taken from the crop asset, so renaming a crop id
-        /// cannot silently desync the readout from the inventory.
+        /// Authors PlayerInventory's starting stock without touching the runtime class.
+        /// The array is a serialized default, so the scene is the right place to set it.
         /// </summary>
-        private static void WireInventoryCounters(
-            HudController hud, CropDefinition crop, Text seedLabel, Text produceLabel)
+        private static void WireStartingItems(
+            PlayerInventory inventory, KeyValuePair<string, int>[] items)
         {
-            if (hud == null || crop == null)
+            SerializedObject so = new SerializedObject(inventory);
+            SerializedProperty list = so.FindProperty("startingItems");
+
+            if (list == null)
             {
+                Debug.LogError("Little Farm Story: PlayerInventory has no 'startingItems' property.");
                 return;
             }
 
-            SerializedObject so = new SerializedObject(hud);
-            SerializedProperty counters = so.FindProperty("counters");
+            list.arraySize = items.Length;
 
-            if (counters == null || !counters.isArray)
+            for (int i = 0; i < items.Length; i++)
             {
-                Debug.LogError("Little Farm Story: HudController has no 'counters' array property.");
-                return;
+                SerializedProperty element = list.GetArrayElementAtIndex(i);
+                element.FindPropertyRelative("ItemId").stringValue = items[i].Key;
+                element.FindPropertyRelative("Amount").intValue = items[i].Value;
             }
-
-            counters.arraySize = 2;
-            SetCounter(counters.GetArrayElementAtIndex(0), crop.SeedItemId, seedLabel);
-            SetCounter(counters.GetArrayElementAtIndex(1), crop.HarvestItemId, produceLabel);
 
             so.ApplyModifiedPropertiesWithoutUndo();
-        }
-
-        private static void SetCounter(SerializedProperty element, string itemId, Text label)
-        {
-            SerializedProperty idProperty = element.FindPropertyRelative("ItemId");
-            SerializedProperty labelProperty = element.FindPropertyRelative("Label");
-            SerializedProperty prefixProperty = element.FindPropertyRelative("Prefix");
-
-            if (idProperty == null || labelProperty == null || prefixProperty == null)
-            {
-                Debug.LogError("Little Farm Story: unexpected HudController.InventoryCounter layout.");
-                return;
-            }
-
-            idProperty.stringValue = itemId;
-            labelProperty.objectReferenceValue = label;
-            prefixProperty.stringValue = string.Empty;
         }
 
         private static void Wire(Object target, string propertyPath, Object value)
@@ -1031,6 +1617,22 @@ namespace LittleFarmStory.EditorTools
             }
 
             property.objectReferenceValue = value;
+            so.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        private static void WireBool(Object target, string propertyPath, bool value)
+        {
+            SerializedObject so = new SerializedObject(target);
+            SerializedProperty property = so.FindProperty(propertyPath);
+
+            if (property == null)
+            {
+                Debug.LogError("Little Farm Story: could not find serialized property '" + propertyPath +
+                               "' on " + target.GetType().Name);
+                return;
+            }
+
+            property.boolValue = value;
             so.ApplyModifiedPropertiesWithoutUndo();
         }
 

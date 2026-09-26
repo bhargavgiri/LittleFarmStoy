@@ -1,66 +1,96 @@
-using System;
 using System.Collections;
 using LittleFarmStory.Core;
+using LittleFarmStory.Economy;
 using LittleFarmStory.Interaction;
 using LittleFarmStory.Inventory;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
 namespace LittleFarmStory.UI
 {
     /// <summary>
-    /// Minimal portrait HUD: currency placeholders, inventory counters, a contextual
-    /// interaction prompt and a transient action message.
-    /// Fully event driven - this component has no Update.
-    /// Uses legacy uGUI Text because TextMeshPro Essential Resources are not imported yet.
+    /// Binds gameplay state to the HUD widgets. It is the only place the two meet.
+    ///
+    /// The data flow is one-way:
+    ///
+    ///   InteractionController.FocusChanged   -> contextual action control
+    ///   InteractableBase.LabelChanged        -> keeps that wording live as a plot ripens
+    ///   PlayerInventory.Changed              -> resource chips
+    ///   CurrencyWallet.BalanceChanged        -> coin display (top bar AND the shop header)
+    ///   ActionFeedbackChannel.MessagePosted  -> toast queue
+    ///
+    /// This component owns no gameplay state, mutates no gameplay system, and has no Update.
+    /// Every refresh is driven by an event, so a HUD with nothing happening costs nothing.
+    ///
+    /// Coins are no longer a placeholder: <see cref="SetCoins"/> is written to from exactly one
+    /// place, <see cref="OnBalanceChanged"/>, which only ever fires from the wallet's own event.
+    /// Nothing else may push a number into the coin display. Level and XP remain placeholders -
+    /// there is no progression system yet - and follow the same one-way path so they will bind
+    /// to a real one without touching this class's shape.
     /// </summary>
     [DisallowMultipleComponent]
     public class HudController : MonoBehaviour
     {
-        /// <summary>Binds one inventory item id to one on-screen label.</summary>
-        [Serializable]
-        public struct InventoryCounter
-        {
-            public string ItemId;
-            public Text Label;
-            [Tooltip("Optional text placed before the quantity, e.g. \"x\".")]
-            public string Prefix;
-        }
-
         [Header("Sources")]
         [SerializeField] private InteractionController interaction;
         [SerializeField] private PlayerInventory inventory;
         [SerializeField] private ActionFeedbackChannel feedback;
+        [SerializeField] private CurrencyWallet wallet;
 
-        [Header("Widgets")]
-        [SerializeField] private Text coinLabel;
-        [SerializeField] private Text xpLabel;
-        [SerializeField] private Text promptLabel;
-        [SerializeField] private GameObject promptRoot;
-        [SerializeField] private GameObject actionButtonRoot;
+        [Header("Top bar")]
+        [SerializeField] private TMP_Text coinLabel;
+        [SerializeField] private TMP_Text levelLabel;
+        [Tooltip("Filled portion of the XP bar. Width is driven by fillAmount, not by layout.")]
+        [SerializeField] private Image xpFill;
+        [SerializeField] private RectTransform coinPunchTarget;
+        [Tooltip("Optional second coin readout inside the shop panel's header. Kept in sync " +
+                 "with coinLabel from the same event, so there is still only one writer.")]
+        [SerializeField] private TMP_Text shopCoinLabel;
+
+        [Header("Resources")]
+        [Tooltip("Every chip on screen: the pinned ones and the inventory sheet rows alike. " +
+                 "Each knows its own item id, so adding a resource needs no code change here.")]
+        [SerializeField] private ResourceChip[] chips;
+
+        [Header("Contextual action")]
+        [SerializeField] private ActionPrompt actionPrompt;
+
+        [Header("Feedback")]
+        [SerializeField] private ToastPresenter toasts;
+
+        [Header("Panels")]
+        [SerializeField] private InventoryPanel inventoryPanel;
         [SerializeField] private Button menuButton;
+        [SerializeField] private GameObject menuPlaceholder;
 
-        [Header("Inventory readout")]
-        [SerializeField] private InventoryCounter[] counters;
-
-        [Header("Action messages")]
-        [SerializeField] private Text messageLabel;
-        [SerializeField] private GameObject messageRoot;
-        [Min(0.2f)] [SerializeField] private float messageDuration = 1.6f;
-
-        [Header("Placeholder values")]
-        [SerializeField] private int coins = 250;
+        [Header("Placeholder progression values")]
+        [Tooltip("No progression system exists yet. These are the starting display values and " +
+                 "are replaced by a real read once one does.")]
         [SerializeField] private int level = 1;
+        [Range(0f, 1f)] [SerializeField] private float xpProgress = 0.35f;
 
         private InteractableBase trackedInteractable;
-        private Coroutine messageRoutine;
+        private Coroutine coinPunch;
+
+        /// <summary>-1 until the first sync, so that sync never punches the coin display.</summary>
+        private int currentCoins = -1;
+
+        // ============================================================ lifecycle
 
         private void Awake()
         {
-            SetCoins(coins);
-            SetLevel(level);
-            ShowPrompt(null);
-            HideMessage();
+            SetLevel(level, xpProgress);
+
+            if (actionPrompt != null)
+            {
+                actionPrompt.SetAvailable(false);
+            }
+
+            if (menuPlaceholder != null)
+            {
+                menuPlaceholder.SetActive(false);
+            }
         }
 
         private void OnEnable()
@@ -74,7 +104,18 @@ namespace LittleFarmStory.UI
             if (inventory != null)
             {
                 inventory.Changed += OnInventoryChanged;
-                RefreshAllCounters();
+                RefreshAllChips();
+            }
+
+            if (wallet != null)
+            {
+                wallet.BalanceChanged += OnBalanceChanged;
+                SetCoins(wallet.GetBalance(), false);
+            }
+            else
+            {
+                Debug.LogError("HudController on '" + name + "' has no CurrencyWallet; the coin " +
+                               "display will never update.", this);
             }
 
             if (feedback != null)
@@ -100,6 +141,11 @@ namespace LittleFarmStory.UI
                 inventory.Changed -= OnInventoryChanged;
             }
 
+            if (wallet != null)
+            {
+                wallet.BalanceChanged -= OnBalanceChanged;
+            }
+
             if (feedback != null)
             {
                 feedback.MessagePosted -= ShowMessage;
@@ -113,68 +159,103 @@ namespace LittleFarmStory.UI
             UntrackInteractable();
         }
 
-        // ============================================================ currency placeholders
+        // ============================================================ top bar
 
-        public void SetCoins(int value)
+        /// <summary>
+        /// The only place a coin number is written to the screen. Called from exactly one
+        /// site - <see cref="OnBalanceChanged"/> - so nothing outside CurrencyWallet can ever
+        /// cause the display to disagree with the actual balance.
+        /// </summary>
+        private void OnBalanceChanged(int newBalance)
         {
-            coins = value;
+            SetCoins(newBalance);
+        }
+
+        private void SetCoins(int value, bool animate = true)
+        {
+            bool first = currentCoins < 0;
+            bool changed = currentCoins != value;
+            currentCoins = value;
 
             if (coinLabel != null)
             {
-                coinLabel.text = value.ToString();
+                coinLabel.SetText("{0}", value);
+            }
+
+            if (shopCoinLabel != null)
+            {
+                shopCoinLabel.SetText("{0}", value);
+            }
+
+            if (animate && changed && !first && coinPunchTarget != null && isActiveAndEnabled)
+            {
+                if (coinPunch != null)
+                {
+                    StopCoroutine(coinPunch);
+                }
+
+                coinPunch = StartCoroutine(PunchCoins());
             }
         }
 
-        public void SetLevel(int value)
+        private IEnumerator PunchCoins()
+        {
+            yield return UiTween.Punch(coinPunchTarget, 0.16f, 0.26f);
+            coinPunch = null;
+        }
+
+        public void SetLevel(int value, float progress01)
         {
             level = value;
+            xpProgress = Mathf.Clamp01(progress01);
 
-            if (xpLabel != null)
+            if (levelLabel != null)
             {
-                xpLabel.text = "Lv " + value;
+                levelLabel.SetText("Lv {0}", value);
+            }
+
+            if (xpFill != null)
+            {
+                xpFill.fillAmount = xpProgress;
             }
         }
 
-        // ============================================================ inventory
+        // ============================================================ resources
 
         private void OnInventoryChanged(string itemId, int quantity)
         {
-            if (counters == null)
+            if (chips == null)
             {
                 return;
             }
 
-            for (int i = 0; i < counters.Length; i++)
+            // Several chips can share an id - a pinned chip and its row in the inventory sheet.
+            for (int i = 0; i < chips.Length; i++)
             {
-                if (counters[i].ItemId == itemId)
+                if (chips[i] != null && chips[i].ItemId == itemId)
                 {
-                    WriteCounter(counters[i], quantity);
+                    chips[i].SetValue(quantity);
                 }
             }
         }
 
-        private void RefreshAllCounters()
+        private void RefreshAllChips()
         {
-            if (counters == null || inventory == null)
+            if (chips == null || inventory == null)
             {
                 return;
             }
 
-            for (int i = 0; i < counters.Length; i++)
+            for (int i = 0; i < chips.Length; i++)
             {
-                WriteCounter(counters[i], inventory.GetQuantity(counters[i].ItemId));
+                if (chips[i] != null)
+                {
+                    chips[i].SetValue(inventory.GetQuantity(chips[i].ItemId), false);
+                }
             }
         }
 
-        private static void WriteCounter(InventoryCounter counter, int quantity)
-        {
-            if (counter.Label != null)
-            {
-                counter.Label.text = counter.Prefix + quantity;
-            }
-        }
-
-        // ============================================================ interaction prompt
+        // ============================================================ contextual action
 
         private void ShowPrompt(IInteractable target)
         {
@@ -182,14 +263,9 @@ namespace LittleFarmStory.UI
 
             bool hasTarget = target != null;
 
-            if (promptRoot != null)
+            if (actionPrompt != null)
             {
-                promptRoot.SetActive(hasTarget);
-            }
-
-            if (actionButtonRoot != null)
-            {
-                actionButtonRoot.SetActive(hasTarget);
+                actionPrompt.SetAvailable(hasTarget);
             }
 
             if (!hasTarget)
@@ -199,7 +275,8 @@ namespace LittleFarmStory.UI
 
             WritePrompt(target);
 
-            // Keep the prompt live: a plot can ripen while the player stands next to it.
+            // Keep the wording live: a plot ripens, and a chicken finishes an egg, while the
+            // player is standing still next to it.
             if (target is InteractableBase dynamicTarget)
             {
                 trackedInteractable = dynamicTarget;
@@ -209,9 +286,9 @@ namespace LittleFarmStory.UI
 
         private void WritePrompt(IInteractable target)
         {
-            if (promptLabel != null && target != null)
+            if (actionPrompt != null && target != null)
             {
-                promptLabel.text = target.InteractionLabel;
+                actionPrompt.SetAction(target.InteractionLabel);
             }
         }
 
@@ -226,49 +303,34 @@ namespace LittleFarmStory.UI
             trackedInteractable = null;
         }
 
-        // ============================================================ transient messages
+        // ============================================================ feedback
 
         public void ShowMessage(string message)
         {
-            if (messageLabel == null || string.IsNullOrEmpty(message))
+            if (toasts != null)
             {
-                return;
-            }
-
-            messageLabel.text = message;
-
-            if (messageRoot != null)
-            {
-                messageRoot.SetActive(true);
-            }
-
-            if (messageRoutine != null)
-            {
-                StopCoroutine(messageRoutine);
-            }
-
-            messageRoutine = StartCoroutine(HideMessageAfterDelay());
-        }
-
-        private IEnumerator HideMessageAfterDelay()
-        {
-            yield return new WaitForSeconds(messageDuration);
-            HideMessage();
-            messageRoutine = null;
-        }
-
-        private void HideMessage()
-        {
-            if (messageRoot != null)
-            {
-                messageRoot.SetActive(false);
+                toasts.Show(message);
             }
         }
+
+        // ============================================================ menu
 
         private void OnMenuClicked()
         {
-            // Phase 1 placeholder. The pause / settings menu arrives with the UI phase.
-            Debug.Log("Menu button pressed - menu system arrives in a later phase.", this);
+            // Settings, audio and help arrive with their own phase. Until then the button is a
+            // real, styled control that says so, rather than a dead hamburger.
+            if (menuPlaceholder != null)
+            {
+                menuPlaceholder.SetActive(!menuPlaceholder.activeSelf);
+            }
+        }
+
+        public void ToggleInventory()
+        {
+            if (inventoryPanel != null)
+            {
+                inventoryPanel.Toggle();
+            }
         }
     }
 }

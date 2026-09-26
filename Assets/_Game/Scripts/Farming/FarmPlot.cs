@@ -303,7 +303,7 @@ namespace LittleFarmStory.Farming
                 case PlotState.Empty:
                     if (TryTill())
                     {
-                        Post("Tilled!");
+                        Post("Plot Tilled");
                     }
 
                     break;
@@ -314,7 +314,7 @@ namespace LittleFarmStory.Farming
 
                 case PlotState.Planted:
                 case PlotState.Growing:
-                    Post(CropName + " is growing...");
+                    Post(CropName + " Is Growing " + Mathf.RoundToInt(GrowthProgress * 100f) + "%");
                     break;
 
                 case PlotState.ReadyToHarvest:
@@ -330,11 +330,11 @@ namespace LittleFarmStory.Farming
             switch (result)
             {
                 case FarmActionResult.Success:
-                    Post("Planted " + CropName + "!");
+                    Post(CropName + " Seed Planted");
                     break;
 
                 case FarmActionResult.NotEnoughSeeds:
-                    Post("No " + CropName + " Seeds");
+                    Post("Need " + CropName + " Seeds");
                     break;
 
                 case FarmActionResult.NoCrop:
@@ -353,7 +353,7 @@ namespace LittleFarmStory.Farming
 
             if (result == FarmActionResult.Success)
             {
-                Post("+" + amount + " " + CropName);
+                Post("Harvested " + CropName + " +" + amount);
             }
             else if (result == FarmActionResult.NoInventory)
             {
@@ -394,6 +394,14 @@ namespace LittleFarmStory.Farming
 
             state = newState;
             RefreshPresentation();
+
+            // Announce ripening, but only to a player who has already worked this plot -
+            // that is the only interactor whose feedback channel we hold.
+            if (newState == PlotState.ReadyToHarvest)
+            {
+                Post(CropName + " Ready!");
+            }
+
             StateChanged?.Invoke(this);
         }
 
@@ -419,25 +427,25 @@ namespace LittleFarmStory.Farming
 
         private void RefreshLabel()
         {
-            string cropName = CropName.ToUpperInvariant();
-
+            // Plain title case: the prompt has to read as an instruction to someone who has
+            // never seen the game, not as a debug tag.
             switch (state)
             {
                 case PlotState.Empty:
-                    SetLabel("TILL");
+                    SetLabel("Till");
                     break;
 
                 case PlotState.Tilled:
-                    SetLabel("PLANT " + cropName);
+                    SetLabel("Plant " + CropName);
                     break;
 
                 case PlotState.Planted:
                 case PlotState.Growing:
-                    SetLabel(cropName + " GROWING");
+                    SetLabel("Growing");
                     break;
 
                 case PlotState.ReadyToHarvest:
-                    SetLabel("HARVEST");
+                    SetLabel("Harvest");
                     break;
             }
         }

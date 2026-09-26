@@ -298,6 +298,20 @@ namespace LittleFarmStory.EditorTools
             }
         }
 
+        /// <summary>
+        /// Clears every static flag on a hierarchy. Anything that moves at runtime must not be
+        /// batching-static: Unity bakes a batching-static renderer into a shared combined mesh
+        /// at its authored transform, so moving it afterwards either does nothing visible or
+        /// tears the batch. Used to carve the animals back out of the static world.
+        /// </summary>
+        public static void ClearStatic(GameObject root)
+        {
+            foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+            {
+                GameObjectUtility.SetStaticEditorFlags(t.gameObject, 0);
+            }
+        }
+
         // ---------------------------------------------------------------- sprites
 
         /// <summary>

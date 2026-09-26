@@ -65,6 +65,8 @@ namespace LittleFarmStory.EditorTools
         public Material Charcoal;
         public Material Beak;
         public Material Comb;
+        /// <summary>Second plumage tone, so a flock is not all one colour.</summary>
+        public Material ChickenBrown;
         public Material Muzzle;
         public Material Horn;
 
@@ -146,6 +148,7 @@ namespace LittleFarmStory.EditorTools
                 Charcoal = ProtoAssets.Lit("Charcoal", Hex("33302C"), matte),
                 Beak = ProtoAssets.Lit("Beak", Hex("F2A33C"), soft),
                 Comb = ProtoAssets.Lit("Comb", Hex("E05252"), matte),
+                ChickenBrown = ProtoAssets.Lit("ChickenBrown", Hex("C98B52"), matte),
                 Muzzle = ProtoAssets.Lit("Muzzle", Hex("F0A0A5"), matte),
                 Horn = ProtoAssets.Lit("Horn", Hex("E8DCC0"), soft),
 

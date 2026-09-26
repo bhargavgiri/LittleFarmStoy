@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b09dfbfeea41f9948861d0b7953b1a3f, type: 3}
+  m_Name: Shop_WheatSeeds
+  m_EditorClassIdentifier: LittleFarmStory.Runtime::LittleFarmStory.Economy.ShopItemDefinition
+  itemId: seed_wheat
+  displayName: Wheat Seeds
+  icon: {fileID: 21300000, guid: 49af2d46a1fb2f84f974aac5c3d1e51b, type: 3}
+  enabled: 1
+  purchasable: 1
+  buyPrice: 2
+  sellable: 0
+  sellPrice: 0
+  minQuantity: 1
+  maxQuantity: 99
+  quantityStep: 1

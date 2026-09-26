@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace LittleFarmStory.EditorTools
 {
@@ -670,6 +671,475 @@ namespace LittleFarmStory.EditorTools
             builder.EnforceOutwardFrom(new Vector3(x, baseY + height * 0.4f, 0f), marker);
         }
 
+        // ================================================================ phase 4A shapes
+
+        /// <summary>
+        /// Gambrel roof: the four-slope barn profile, shallow on top and steep at the eaves.
+        /// This one shape is what makes a barn read as a barn from across the farm, which a
+        /// plain triangular prism never does. Unit sized, ridge along X.
+        /// </summary>
+        public static Mesh GambrelPrism(float shoulderHeight = 0.55f, float shoulderWidth = 0.72f)
+        {
+            shoulderHeight = Mathf.Clamp(shoulderHeight, 0.2f, 0.85f);
+            shoulderWidth = Mathf.Clamp(shoulderWidth, 0.3f, 0.95f);
+
+            return SaveOrLoad("Mesh_Gambrel" + Key(shoulderHeight, shoulderWidth),
+                () => BuildExtrudedProfile("Gambrel", new[]
+                {
+                    new Vector2(-0.5f, -0.5f),
+                    new Vector2(-0.5f * shoulderWidth, -0.5f + shoulderHeight),
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0.5f * shoulderWidth, -0.5f + shoulderHeight),
+                    new Vector2(0.5f, -0.5f)
+                }));
+        }
+
+        /// <summary>
+        /// Hipped roof: slopes on all four sides meeting at a short ridge. Softer and more
+        /// domestic than a gable, which is what separates the farmhouse from the barn.
+        /// </summary>
+        public static Mesh HipRoof(float ridgeFraction = 0.42f)
+        {
+            ridgeFraction = Mathf.Clamp(ridgeFraction, 0.05f, 0.9f);
+            return SaveOrLoad("Mesh_HipRoof" + Key(ridgeFraction), () => BuildHipRoof(ridgeFraction));
+        }
+
+        private static Mesh BuildHipRoof(float ridgeFraction)
+        {
+            MeshBuilder builder = new MeshBuilder();
+            int marker = builder.Marker;
+
+            const float h = 0.5f;
+            float r = h * ridgeFraction;
+
+            Vector3 bbl = new Vector3(-h, -h, -h);
+            Vector3 bbr = new Vector3(h, -h, -h);
+            Vector3 bfl = new Vector3(-h, -h, h);
+            Vector3 bfr = new Vector3(h, -h, h);
+
+            Vector3 ridgeL = new Vector3(-r, h, 0f);
+            Vector3 ridgeR = new Vector3(r, h, 0f);
+
+            builder.AddQuad(bfl, bfr, ridgeR, ridgeL);   // front slope
+            builder.AddQuad(bbr, bbl, ridgeL, ridgeR);   // back slope
+            builder.AddTriangle(bbl, bfl, ridgeL);       // left hip
+            builder.AddTriangle(bfr, bbr, ridgeR);       // right hip
+            builder.AddQuad(bbl, bbr, bfr, bfl);         // underside
+
+            builder.EnforceOutwardFrom(new Vector3(0f, -0.1f, 0f), marker);
+            return builder.ToMesh("HipRoof", true);
+        }
+
+        /// <summary>
+        /// Extrudes a closed 2D profile (XY) along Z by one unit. Shared by the roof shapes.
+        /// The profile must be convex for the winding correction to be exact.
+        /// </summary>
+        private static Mesh BuildExtrudedProfile(string meshName, Vector2[] profile)
+        {
+            MeshBuilder builder = new MeshBuilder();
+            int marker = builder.Marker;
+
+            Vector3 centroid = Vector3.zero;
+            for (int i = 0; i < profile.Length; i++)
+            {
+                centroid += new Vector3(profile[i].x, profile[i].y, 0f);
+            }
+
+            centroid /= profile.Length;
+
+            const float back = -0.5f;
+            const float front = 0.5f;
+
+            // Side walls of the extrusion.
+            for (int i = 0; i < profile.Length; i++)
+            {
+                Vector2 a = profile[i];
+                Vector2 b = profile[(i + 1) % profile.Length];
+
+                builder.AddQuad(
+                    new Vector3(a.x, a.y, back),
+                    new Vector3(b.x, b.y, back),
+                    new Vector3(b.x, b.y, front),
+                    new Vector3(a.x, a.y, front));
+            }
+
+            // End caps as fans from the profile centroid.
+            Vector3[] backRim = new Vector3[profile.Length];
+            Vector3[] frontRim = new Vector3[profile.Length];
+            for (int i = 0; i < profile.Length; i++)
+            {
+                backRim[i] = new Vector3(profile[i].x, profile[i].y, back);
+                frontRim[i] = new Vector3(profile[i].x, profile[i].y, front);
+            }
+
+            builder.AddFan(new Vector3(centroid.x, centroid.y, back), backRim, false);
+            builder.AddFan(new Vector3(centroid.x, centroid.y, front), frontRim, false);
+
+            builder.EnforceOutwardFrom(new Vector3(centroid.x, centroid.y, 0f), marker);
+            return builder.ToMesh(meshName, true);
+        }
+
+        /// <summary>
+        /// Flat disc with a seeded, irregular rim. Ground patches, pond shores and path blobs
+        /// built from this stop reading as circles, which is what makes the terrain organic.
+        /// </summary>
+        public static Mesh IrregularDisc(int seed, int segments = 14, float jitter = 0.22f)
+        {
+            return SaveOrLoad("Mesh_IrregDisc_" + seed + "_" + segments + Key(jitter), () =>
+            {
+                MeshBuilder builder = new MeshBuilder();
+                System.Random random = new System.Random(seed);
+
+                Vector3[] rim = new Vector3[segments];
+                for (int s = 0; s < segments; s++)
+                {
+                    float angle = s / (float)segments * Mathf.PI * 2f;
+                    float radius = 0.5f * (1f - jitter * 0.5f + (float)random.NextDouble() * jitter);
+                    rim[s] = new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
+                }
+
+                builder.AddFan(Vector3.zero, rim, false);
+
+                Mesh mesh = builder.ToMesh("IrregularDisc", false);
+                EnsureFacing(mesh, Vector3.up);
+                mesh.RecalculateNormals();
+                return mesh;
+            });
+        }
+
+        /// <summary>
+        /// A soft landscape mound: a lathed dome with a seeded irregular rim so a row of them
+        /// reads as rolling ground rather than a line of identical bumps.
+        /// Purely decorative - these live outside the walkable boundary.
+        /// </summary>
+        public static Mesh Mound(int seed, int rings = 4, int segments = 12)
+        {
+            rings = Mathf.Max(2, rings);
+            segments = Mathf.Max(4, segments);
+
+            return SaveOrLoad("Mesh_Mound_" + seed + "_" + rings + "_" + segments, () =>
+            {
+                MeshBuilder builder = new MeshBuilder();
+                System.Random random = new System.Random(seed);
+
+                // Per-column radius scale, smoothed around the ring so the silhouette undulates.
+                float[] columnScale = new float[segments];
+                for (int s = 0; s < segments; s++)
+                {
+                    columnScale[s] = 0.82f + (float)random.NextDouble() * 0.36f;
+                }
+
+                // Rings stop short of the pole so no ring collapses to zero radius; the
+                // apex is then closed with a single fan. This avoids degenerate triangles,
+                // which would otherwise give the summit zero-length normals and shade black.
+                Vector3[][] ringVerts = new Vector3[rings][];
+                for (int r = 0; r < rings; r++)
+                {
+                    float t = r / (float)rings;
+                    float angle = Mathf.PI * 0.5f * t;
+                    float ringRadius = Mathf.Cos(angle) * 0.5f;
+                    float ringHeight = Mathf.Sin(angle) * 0.5f - 0.5f;
+
+                    ringVerts[r] = new Vector3[segments];
+                    for (int s = 0; s < segments; s++)
+                    {
+                        float a = s / (float)segments * Mathf.PI * 2f;
+                        float radius = ringRadius * columnScale[s];
+                        ringVerts[r][s] = new Vector3(Mathf.Cos(a) * radius, ringHeight, Mathf.Sin(a) * radius);
+                    }
+                }
+
+                for (int r = 0; r < rings - 1; r++)
+                {
+                    for (int s = 0; s < segments; s++)
+                    {
+                        int next = (s + 1) % segments;
+                        builder.AddQuad(
+                            ringVerts[r][s], ringVerts[r][next],
+                            ringVerts[r + 1][next], ringVerts[r + 1][s]);
+                    }
+                }
+
+                // Close the summit and the base.
+                builder.AddFan(new Vector3(0f, 0f, 0f), ringVerts[rings - 1], false);
+                builder.AddFan(new Vector3(0f, -0.5f, 0f), ringVerts[0], true);
+
+                builder.EnforceOutwardFrom(new Vector3(0f, -0.25f, 0f), 0);
+                return builder.ToMesh("Mound", true);
+            });
+        }
+
+        /// <summary>
+        /// A plank: a box bevelled only along its long edges, so fence rails and decking read
+        /// as sawn timber rather than as chamfered bricks. Unit sized, length along Z.
+        /// </summary>
+        public static Mesh Plank(float bevel = 0.12f)
+        {
+            bevel = Mathf.Clamp(bevel, 0.02f, 0.4f);
+            return SaveOrLoad("Mesh_Plank" + Key(bevel), () =>
+            {
+                MeshBuilder builder = new MeshBuilder();
+                int marker = builder.Marker;
+
+                float h = 0.5f;
+                float i = h - bevel;
+
+                // Octagonal cross-section in XY, extruded along Z.
+                Vector2[] section =
+                {
+                    new Vector2(-i, -h), new Vector2(i, -h),
+                    new Vector2(h, -i), new Vector2(h, i),
+                    new Vector2(i, h), new Vector2(-i, h),
+                    new Vector2(-h, i), new Vector2(-h, -i)
+                };
+
+                Vector3[] backRim = new Vector3[section.Length];
+                Vector3[] frontRim = new Vector3[section.Length];
+
+                for (int s = 0; s < section.Length; s++)
+                {
+                    backRim[s] = new Vector3(section[s].x, section[s].y, -h);
+                    frontRim[s] = new Vector3(section[s].x, section[s].y, h);
+                }
+
+                for (int s = 0; s < section.Length; s++)
+                {
+                    int next = (s + 1) % section.Length;
+                    builder.AddQuad(backRim[s], backRim[next], frontRim[next], frontRim[s]);
+                }
+
+                builder.AddFan(new Vector3(0f, 0f, -h), backRim, false);
+                builder.AddFan(new Vector3(0f, 0f, h), frontRim, false);
+
+                builder.EnforceOutwardFrom(Vector3.zero, marker);
+                return builder.ToMesh("Plank", true);
+            });
+        }
+
+        /// <summary>
+        /// A box with a batter: wider at the base than the top. Building bodies built from this
+        /// sit into the ground instead of looking like a crate dropped on the lawn.
+        /// </summary>
+        public static Mesh Trapezoid(float topScale = 0.9f)
+        {
+            // Values above 1 flare outwards, which is what buckets, tubs and barrow trays
+            // need; below 1 gives a building batter. Both stay convex, so the winding
+            // correction remains exact.
+            topScale = Mathf.Clamp(topScale, 0.2f, 2.2f);
+            return SaveOrLoad("Mesh_Trapezoid" + Key(topScale), () =>
+            {
+                MeshBuilder builder = new MeshBuilder();
+                int marker = builder.Marker;
+
+                const float h = 0.5f;
+                float t = h * topScale;
+
+                Vector3 b0 = new Vector3(-h, -h, -h);
+                Vector3 b1 = new Vector3(h, -h, -h);
+                Vector3 b2 = new Vector3(h, -h, h);
+                Vector3 b3 = new Vector3(-h, -h, h);
+
+                Vector3 t0 = new Vector3(-t, h, -t);
+                Vector3 t1 = new Vector3(t, h, -t);
+                Vector3 t2 = new Vector3(t, h, t);
+                Vector3 t3 = new Vector3(-t, h, t);
+
+                builder.AddQuad(b0, b1, t1, t0);
+                builder.AddQuad(b1, b2, t2, t1);
+                builder.AddQuad(b2, b3, t3, t2);
+                builder.AddQuad(b3, b0, t0, t3);
+                builder.AddQuad(t0, t1, t2, t3);
+                builder.AddQuad(b3, b2, b1, b0);
+
+                builder.EnforceOutwardFrom(Vector3.zero, marker);
+                return builder.ToMesh("Trapezoid", true);
+            });
+        }
+
+        // ================================================================ organic actor shapes
+
+        /// <summary>
+        /// Ovoid: taller than wide, fattest below centre. The default head and body shape for
+        /// every actor. A sphere reads as a ball; an egg reads as a skull or a torso, and that
+        /// difference is most of what separates a designed character from assembled primitives.
+        /// </summary>
+        public static Mesh Egg(int rings = 7, int segments = 10)
+        {
+            rings = Mathf.Max(3, rings);
+            segments = Mathf.Max(5, segments);
+
+            Vector2[] profile = new Vector2[rings + 1];
+            for (int i = 0; i <= rings; i++)
+            {
+                float t = i / (float)rings;
+                float angle = Mathf.PI * t;
+
+                // Radius falls off faster towards the top than the bottom.
+                float bias = Mathf.Lerp(1.08f, 0.82f, t * t);
+                profile[i] = new Vector2(Mathf.Sin(angle) * 0.5f * bias, -Mathf.Cos(angle) * 0.5f);
+            }
+
+            return Lathe("Mesh_Egg_" + rings + "_" + segments, profile, segments);
+        }
+
+        /// <summary>
+        /// Fat-bottomed ovoid with a rounded shoulder: muzzles, hands, wattles, udders.
+        /// Wider and squatter than <see cref="Egg"/>.
+        /// </summary>
+        public static Mesh Pear(int segments = 9)
+        {
+            return Lathe("Mesh_Pear_" + segments, new[]
+            {
+                new Vector2(0f, -0.5f),
+                new Vector2(0.30f, -0.40f),
+                new Vector2(0.46f, -0.20f),
+                new Vector2(0.50f, 0.02f),
+                new Vector2(0.42f, 0.24f),
+                new Vector2(0.26f, 0.40f),
+                new Vector2(0f, 0.5f)
+            }, segments);
+        }
+
+        /// <summary>Rounded at the base, drawn to a point on top. Comb lobes, tail tufts, ears.</summary>
+        public static Mesh Teardrop(int segments = 8)
+        {
+            return Lathe("Mesh_Teardrop_" + segments, new[]
+            {
+                new Vector2(0f, -0.5f),
+                new Vector2(0.32f, -0.36f),
+                new Vector2(0.48f, -0.12f),
+                new Vector2(0.44f, 0.10f),
+                new Vector2(0.28f, 0.30f),
+                new Vector2(0f, 0.5f)
+            }, segments);
+        }
+
+        /// <summary>
+        /// A cylinder with domed caps and a slight waist: the workhorse limb segment.
+        /// Chunky, and it never shows a hard rim where it meets the next joint.
+        /// </summary>
+        public static Mesh Drum(int segments = 9)
+        {
+            return Lathe("Mesh_Drum_" + segments, new[]
+            {
+                new Vector2(0f, -0.5f),
+                new Vector2(0.34f, -0.44f),
+                new Vector2(0.48f, -0.32f),
+                new Vector2(0.50f, 0f),
+                new Vector2(0.48f, 0.32f),
+                new Vector2(0.34f, 0.44f),
+                new Vector2(0f, 0.5f)
+            }, segments);
+        }
+
+        /// <summary>
+        /// Triangular wedge pointing along +Z, tapering to a short vertical edge rather than a
+        /// needle point so the silhouette stays readable. Beaks, boot soles, hooves, eyebrows.
+        /// </summary>
+        public static Mesh Wedge(float tipHeight = 0.28f)
+        {
+            tipHeight = Mathf.Clamp(tipHeight, 0.02f, 0.9f);
+
+            return SaveOrLoad("Mesh_Wedge" + Key(tipHeight), () =>
+            {
+                MeshBuilder builder = new MeshBuilder();
+                int marker = builder.Marker;
+
+                const float h = 0.5f;
+                float tip = h * tipHeight;
+
+                Vector3 backBL = new Vector3(-h, -h, -h);
+                Vector3 backBR = new Vector3(h, -h, -h);
+                Vector3 backTR = new Vector3(h, h, -h);
+                Vector3 backTL = new Vector3(-h, h, -h);
+                Vector3 tipB = new Vector3(0f, -tip, h);
+                Vector3 tipT = new Vector3(0f, tip, h);
+
+                builder.AddQuad(backBL, backBR, backTR, backTL);  // back
+                builder.AddQuad(backBL, backTL, tipT, tipB);      // left flank
+                builder.AddQuad(backBR, tipB, tipT, backTR);      // right flank
+                builder.AddTriangle(backTL, backTR, tipT);        // top
+                builder.AddTriangle(backBL, tipB, backBR);        // bottom
+
+                builder.EnforceOutwardFrom(new Vector3(0f, 0f, -0.15f), marker);
+                return builder.ToMesh("Wedge", true);
+            });
+        }
+
+        /// <summary>
+        /// A tapering horn that curves as it rises, following an exact circular arc of unit
+        /// length. Straight cones read as spikes; the sweep is what makes a horn a horn.
+        /// Base sits at y = -0.5, curving towards -X.
+        /// </summary>
+        public static Mesh Crescent(float sweepDegrees = 55f, int rings = 6, int segments = 7)
+        {
+            sweepDegrees = Mathf.Clamp(sweepDegrees, 0f, 150f);
+            rings = Mathf.Max(3, rings);
+            segments = Mathf.Max(4, segments);
+
+            return SaveOrLoad("Mesh_Crescent" + Key(sweepDegrees) + "_" + rings + "_" + segments, () =>
+            {
+                MeshBuilder builder = new MeshBuilder();
+
+                float sweep = sweepDegrees * Mathf.Deg2Rad;
+                bool curved = sweep > 0.01f;
+                float arcRadius = curved ? 1f / sweep : 0f;
+
+                Vector3[][] ringVerts = new Vector3[rings + 1][];
+                Vector3[] ringCentres = new Vector3[rings + 1];
+
+                for (int r = 0; r <= rings; r++)
+                {
+                    float t = r / (float)rings;
+                    float a = sweep * t;
+
+                    // Exact arc: centre of curvature sits at (-arcRadius, -0.5, 0).
+                    Vector3 centre = curved
+                        ? new Vector3(-arcRadius + arcRadius * Mathf.Cos(a), -0.5f + arcRadius * Mathf.Sin(a), 0f)
+                        : new Vector3(0f, -0.5f + t, 0f);
+
+                    Vector3 direction = curved
+                        ? new Vector3(-Mathf.Sin(a), Mathf.Cos(a), 0f)
+                        : Vector3.up;
+
+                    Vector3 right = Vector3.Cross(direction, Vector3.forward).normalized;
+                    Vector3 forward = Vector3.Cross(right, direction).normalized;
+
+                    float radius = Mathf.Lerp(0.5f, 0.05f, t * t);
+
+                    ringCentres[r] = centre;
+                    ringVerts[r] = new Vector3[segments];
+
+                    for (int s = 0; s < segments; s++)
+                    {
+                        float angle = s / (float)segments * Mathf.PI * 2f;
+                        ringVerts[r][s] = centre
+                            + right * (Mathf.Cos(angle) * radius)
+                            + forward * (Mathf.Sin(angle) * radius);
+                    }
+                }
+
+                for (int r = 0; r < rings; r++)
+                {
+                    for (int s = 0; s < segments; s++)
+                    {
+                        int next = (s + 1) % segments;
+                        builder.AddQuad(
+                            ringVerts[r][s], ringVerts[r][next],
+                            ringVerts[r + 1][next], ringVerts[r + 1][s]);
+                    }
+                }
+
+                builder.AddFan(ringCentres[0], ringVerts[0], true);
+                builder.AddFan(ringCentres[rings], ringVerts[rings], false);
+
+                // A swept horn is not star-shaped about any single point, so the per-face
+                // correction would be unreliable here. The closed-volume test in ToMesh is
+                // the right backstop, and it is exact for a closed mesh like this one.
+                return builder.ToMesh("Crescent", true);
+            });
+        }
+
         // ================================================================ prism (roofs)
 
         /// <summary>
@@ -802,6 +1272,11 @@ namespace LittleFarmStory.EditorTools
 
             Matrix4x4 worldToRoot = root.transform.worldToLocalMatrix;
 
+            // Combining collapses many renderers into one, so the single surviving renderer
+            // has to inherit shadow casting from the parts. Without this a whole tree would
+            // silently stop casting because the merged renderer defaulted to off.
+            bool anyCastsShadows = false;
+
             for (int i = 0; i < filters.Length; i++)
             {
                 MeshFilter filter = filters[i];
@@ -810,6 +1285,11 @@ namespace LittleFarmStory.EditorTools
                 if (filter.sharedMesh == null || renderer == null || renderer.sharedMaterial == null)
                 {
                     return false;
+                }
+
+                if (renderer.shadowCastingMode != ShadowCastingMode.Off)
+                {
+                    anyCastsShadows = true;
                 }
 
                 Material material = renderer.sharedMaterial;
@@ -906,7 +1386,7 @@ namespace LittleFarmStory.EditorTools
             }
 
             rootRenderer.sharedMaterials = materials.ToArray();
-            ProtoAssets.ApplyMobileRendererSettings(rootRenderer, false);
+            ProtoAssets.ApplyMobileRendererSettings(rootRenderer, anyCastsShadows);
 
             return true;
         }

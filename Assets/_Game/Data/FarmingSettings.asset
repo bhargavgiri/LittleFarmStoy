@@ -12,6 +12,6 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 86bb043d51283ed4b9ed24f646b7e77f, type: 3}
   m_Name: FarmingSettings
   m_EditorClassIdentifier: LittleFarmStory.Runtime::LittleFarmStory.Farming.FarmingSettings
-  developmentGrowthMultiplier: 1
+  developmentGrowthMultiplier: 4
   editorOnly: 1
   growthTickInterval: 0.2

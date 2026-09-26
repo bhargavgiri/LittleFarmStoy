@@ -1,0 +1,39 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9e0eec4da1cc9d04491182d6be01f7c4, type: 3}
+  m_Name: Animal_Cow
+  m_EditorClassIdentifier: LittleFarmStory.Runtime::LittleFarmStory.Animals.AnimalDefinition
+  animalId: cow
+  displayName: Cow
+  animalType: 1
+  prefab: {fileID: 302193164370188679, guid: 1007bafdf6001ce43aedd444bb611da6, type: 3}
+  purchaseCost: 450
+  produceSellValue: 0
+  feedItemId: corn
+  feedAmount: 2
+  hungerDuration: 75
+  hungerThreshold: 0.5
+  eatDuration: 2.5
+  productItemId: milk
+  productAmount: 2
+  happyBonusAmount: 1
+  productionSeconds: 50
+  feedHappiness: 22
+  happinessDecayPerSecond: 0.6
+  happyThreshold: 70
+  moveSpeed: 0.34
+  turnSpeed: 110
+  idleDwell: 5.5
+  wanderChance: 0.6
+  interactionRadius: 1.1
+  habitatType: 1
+  capacityWeight: 1

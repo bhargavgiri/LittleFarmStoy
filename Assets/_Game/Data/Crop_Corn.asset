@@ -17,11 +17,15 @@ MonoBehaviour:
   seedItemId: 
   harvestItemId: 
   growthStages: 3
-  secondsPerStage: 20
-  stagePrefabs: []
+  secondsPerStage: 12
+  stagePrefabs:
+  - {fileID: 6013181040638992135, guid: 0b4e38056b8332f4781572a1cad1b934, type: 3}
+  - {fileID: 5181381677292918057, guid: 4fbb01839a4e3bf4185c91608412a9e8, type: 3}
+  - {fileID: 9198891454575026122, guid: 3ac572a8ca4b1804eb31c793522a3043, type: 3}
+  - {fileID: 386285337198073781, guid: 2756ff37d8c615e429007cce3e125bf9, type: 3}
   seedCost: 14
   sellValue: 34
   yieldMin: 1
-  yieldMax: 3
+  yieldMax: 2
   cropColor: {r: 0.9607843, g: 0.8156863, b: 0.27450982, a: 1}
   soilColor: {r: 0.43137255, g: 0.29803923, b: 0.1882353, a: 1}
