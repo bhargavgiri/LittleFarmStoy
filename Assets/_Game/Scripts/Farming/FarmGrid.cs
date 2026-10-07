@@ -186,6 +186,95 @@ namespace LittleFarmStory.Farming
             return coord.X >= 0 && coord.X < size.x && coord.Z >= 0 && coord.Z < size.y;
         }
 
+        // ============================================================ save preparation
+
+        /// <summary>Captures every plot in this field. Empty while the field has not been built.</summary>
+        public FarmPlotSnapshot[] CaptureSnapshots()
+        {
+            if (plots == null)
+            {
+                return Array.Empty<FarmPlotSnapshot>();
+            }
+
+            List<FarmPlotSnapshot> captured = new List<FarmPlotSnapshot>(plots.Length);
+
+            for (int i = 0; i < plots.Length; i++)
+            {
+                if (plots[i] != null)
+                {
+                    captured.Add(plots[i].CaptureSnapshot());
+                }
+            }
+
+            return captured.ToArray();
+        }
+
+        /// <summary>
+        /// Restores saved plot states into the plots this field has already built.
+        /// Only for the save system - gameplay must go through the plots' own Try* methods.
+        ///
+        /// A snapshot naming a coordinate this field no longer has (the grid was resized since
+        /// the save) is skipped with a warning rather than dropped silently, and a snapshot
+        /// naming a crop this field does not grow restores as bare soil rather than as another
+        /// field's crop.
+        /// </summary>
+        public void RestoreSnapshots(IReadOnlyList<FarmPlotSnapshot> snapshots)
+        {
+            if (snapshots == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < snapshots.Count; i++)
+            {
+                FarmPlotSnapshot snapshot = snapshots[i];
+
+                if (!TryGetPlot(snapshot.Coord, out FarmPlot plot))
+                {
+                    Debug.LogWarning("FarmGrid '" + fieldId + "': saved plot " + snapshot.CoordX + "," +
+                                     snapshot.CoordZ + " is outside this field; it was not restored.", this);
+                    continue;
+                }
+
+                CropDefinition resolved = ResolveCrop(snapshot.CropId);
+
+                if (resolved == null)
+                {
+                    // A plot mid-growth with no crop to grow would sit in Growing forever and
+                    // could never be harvested. Bare soil is the only coherent state left.
+                    snapshot = new FarmPlotSnapshot
+                    {
+                        CoordX = snapshot.CoordX,
+                        CoordZ = snapshot.CoordZ,
+                        State = PlotState.Empty
+                    };
+                }
+
+                plot.RestoreSnapshot(snapshot, resolved);
+            }
+        }
+
+        /// <summary>
+        /// A field grows exactly one crop, so resolving a saved crop id needs no registry:
+        /// it either names this field's crop or it names nothing this field can plant.
+        /// </summary>
+        private CropDefinition ResolveCrop(string cropId)
+        {
+            if (string.IsNullOrEmpty(cropId))
+            {
+                return assignedCrop;
+            }
+
+            if (assignedCrop != null && assignedCrop.CropId == cropId)
+            {
+                return assignedCrop;
+            }
+
+            Debug.LogWarning("FarmGrid '" + fieldId + "': a saved plot names crop '" + cropId +
+                             "', which this field does not grow; it was restored as empty soil.", this);
+            return null;
+        }
+
         public Vector3 CoordToLocal(GridCoord coord)
         {
             float offsetX = (size.x - 1) * 0.5f;

@@ -112,5 +112,39 @@ namespace LittleFarmStory.Inventory
 
         /// <summary>Snapshot for the future save system. Order is not guaranteed.</summary>
         public IReadOnlyDictionary<string, int> All => quantities;
+
+        /// <summary>
+        /// Replaces the entire store with a saved one. Only for the save system - gameplay must
+        /// go through <see cref="Add"/> and <see cref="Remove"/>.
+        ///
+        /// Items the player used to hold but does not any more are reported as 0 rather than
+        /// simply vanishing, so a listener showing a quantity has no way to keep displaying a
+        /// stale one.
+        /// </summary>
+        public void RestoreAll(IEnumerable<KeyValuePair<string, int>> items)
+        {
+            HashSet<string> touched = new HashSet<string>(quantities.Keys);
+
+            quantities.Clear();
+
+            if (items != null)
+            {
+                foreach (KeyValuePair<string, int> item in items)
+                {
+                    if (string.IsNullOrEmpty(item.Key))
+                    {
+                        continue;
+                    }
+
+                    quantities[item.Key] = Mathf.Max(0, item.Value);
+                    touched.Add(item.Key);
+                }
+            }
+
+            foreach (string itemId in touched)
+            {
+                Changed?.Invoke(itemId, GetQuantity(itemId));
+            }
+        }
     }
 }

@@ -7,6 +7,7 @@ using LittleFarmStory.Farming;
 using LittleFarmStory.Input;
 using LittleFarmStory.Interaction;
 using LittleFarmStory.Inventory;
+using LittleFarmStory.Persistence;
 using LittleFarmStory.Player;
 using LittleFarmStory.UI;
 using LittleFarmStory.World;
@@ -47,6 +48,9 @@ namespace LittleFarmStory.EditorTools
 
         /// <summary>Logs every transaction and every refusal while the economy is being proven.</summary>
         private const bool EconomyDiagnostics = true;
+
+        /// <summary>Logs every save and load while persistence is being proven.</summary>
+        private const bool SaveDiagnostics = true;
 
         // ---- economy. The shop catalogue and the crop assets are both authored from these,
         // so a price exists in exactly one place.
@@ -214,6 +218,8 @@ namespace LittleFarmStory.EditorTools
 
             WireEverything(player, cameraController, hud, interactableLayer, wheat);
 
+            BuildSaveManager(systemsRoot.transform, player, cameraController, worldRoot);
+
             bool playable = VerifyBuild(
                 player, worldRoot, hud.Hud, wheat, tomato, corn, chickenDefinition, cowDefinition,
                 shopDefinition, economySettings);
@@ -252,6 +258,28 @@ namespace LittleFarmStory.EditorTools
                 Debug.LogError("Little Farm Story: farm scene was saved to " + ScenePath +
                                " but verification FAILED. Do not treat this build as playable.");
             }
+        }
+
+        /// <summary>
+        /// Adds the save system beside <c>GameBootstrap</c> and hands it every system that owns
+        /// savable state. Fields and habitats are resolved from the built world rather than
+        /// listed by hand, so a field added to the farm later is saved without touching this.
+        /// </summary>
+        private static void BuildSaveManager(
+            Transform systemsRoot, GameObject player,
+            FarmCameraController cameraController, GameObject worldRoot)
+        {
+            GameObject host = ProtoAssets.Empty("SaveSystem", systemsRoot, Vector3.zero);
+            SaveManager manager = host.AddComponent<SaveManager>();
+
+            manager.EditorConfigure(
+                player.GetComponent<CurrencyWallet>(),
+                player.GetComponent<PlayerInventory>(),
+                player.GetComponent<PlayerController>(),
+                cameraController,
+                worldRoot.GetComponentsInChildren<FarmGrid>(true),
+                worldRoot.GetComponentsInChildren<AnimalHabitat>(true),
+                SaveDiagnostics);
         }
 
         // ================================================================ data assets
@@ -749,6 +777,48 @@ namespace LittleFarmStory.EditorTools
                 failures += Require(inventory == null || hudInventory == null ||
                     ReferenceEquals(hudInventory.objectReferenceValue, inventory),
                     "the HUD's PlayerInventory is not the Player's own inventory");
+            }
+
+            // ---------------------------------------------------------------- persistence
+            SaveManager saveManager = Object.FindAnyObjectByType<SaveManager>(FindObjectsInactive.Include);
+
+            if (Require(saveManager != null, "the scene has no SaveManager, so no progress would persist") > 0)
+            {
+                failures++;
+            }
+            else
+            {
+                SerializedObject saveObject = new SerializedObject(saveManager);
+                SerializedProperty saveWallet = saveObject.FindProperty("wallet");
+                SerializedProperty saveInventory = saveObject.FindProperty("inventory");
+                SerializedProperty savePlayer = saveObject.FindProperty("playerController");
+                SerializedProperty saveFields = saveObject.FindProperty("fields");
+                SerializedProperty saveHabitats = saveObject.FindProperty("habitats");
+
+                // Same reasoning as the economy checks above: pointing at *a* wallet is not
+                // enough. Saving a duplicate would silently persist coins nobody can spend.
+                failures += Require(wallet == null || saveWallet == null ||
+                    ReferenceEquals(saveWallet.objectReferenceValue, wallet),
+                    "the SaveManager's CurrencyWallet is not the Player's own wallet");
+                failures += Require(inventory == null || saveInventory == null ||
+                    ReferenceEquals(saveInventory.objectReferenceValue, inventory),
+                    "the SaveManager's PlayerInventory is not the Player's own inventory");
+                failures += Require(savePlayer != null && savePlayer.objectReferenceValue != null,
+                    "the SaveManager has no PlayerController, so the farmer's position would not persist");
+
+                failures += Require(saveFields != null && saveFields.arraySize >= grids.Length,
+                    "the SaveManager knows about " +
+                    (saveFields != null ? saveFields.arraySize : 0) + " fields but the farm has " +
+                    grids.Length + "; crops in the missing fields would not persist");
+
+                AnimalHabitat[] builtHabitats = worldRoot != null
+                    ? worldRoot.GetComponentsInChildren<AnimalHabitat>(true)
+                    : new AnimalHabitat[0];
+
+                failures += Require(saveHabitats != null && saveHabitats.arraySize >= builtHabitats.Length,
+                    "the SaveManager knows about " +
+                    (saveHabitats != null ? saveHabitats.arraySize : 0) + " habitats but the farm has " +
+                    builtHabitats.Length + "; animals in the missing pens would not persist");
             }
 
             // ---------------------------------------------------------------- HUD

@@ -9,41 +9,70 @@ using UnityEngine;
 namespace LittleFarmStory.Tests
 {
     /// <summary>
-    /// Runs the EditMode economy tests inside the Editor that is already open, and writes the
+    /// Runs the EditMode suites inside the Editor that is already open, and writes each one's
     /// results where they can be read without the Test Runner window.
     ///
     /// EditMode tests need neither Play mode nor a second Unity instance, so the project lock
-    /// held by the open Editor does not block them. The file exists so results are evidence
+    /// held by the open Editor does not block them. The files exist so results are evidence
     /// that can be checked afterwards, not something only visible in a window.
+    ///
+    /// Each menu item filters to ONE test class rather than to the assembly, because both
+    /// suites live in the same assembly and an assembly-wide filter would quietly write another
+    /// suite's results into this one's file.
     /// </summary>
-    public static class EconomyTestRunnerMenu
+    public static class TestRunnerMenus
     {
         private const string AssemblyName = "LittleFarmStory.Tests.EditMode";
-        private const string ResultsPath = "Documentation/ECONOMY_TEST_RESULTS.md";
 
         [MenuItem("Little Farm Story/Run Economy Tests", false, 41)]
-        public static void Run()
+        public static void RunEconomyTests()
+        {
+            Run("economy", "LittleFarmStory.Tests.EconomyTests",
+                "Documentation/ECONOMY_TEST_RESULTS.md", "Run Economy Tests");
+        }
+
+        [MenuItem("Little Farm Story/Run Persistence Tests", false, 43)]
+        public static void RunPersistenceTests()
+        {
+            Run("persistence", "LittleFarmStory.Tests.PersistenceTests",
+                "Documentation/PERSISTENCE_TEST_RESULTS.md", "Run Persistence Tests");
+        }
+
+        private static void Run(string label, string testClass, string resultsPath, string menuName)
         {
             TestRunnerApi api = ScriptableObject.CreateInstance<TestRunnerApi>();
-            api.RegisterCallbacks(new ResultWriter(api));
+            api.RegisterCallbacks(new ResultWriter(api, label, resultsPath, menuName));
 
-            Debug.Log("Little Farm Story: running economy EditMode tests...");
+            Debug.Log("Little Farm Story: running " + label + " EditMode tests...");
 
             api.Execute(new ExecutionSettings(new Filter
             {
                 testMode = TestMode.EditMode,
-                assemblyNames = new[] { AssemblyName }
+                assemblyNames = new[] { AssemblyName },
+                groupNames = new[] { "^" + Regex(testClass) }
             }));
+        }
+
+        /// <summary>Escapes the dots in a namespace so the group filter matches it literally.</summary>
+        private static string Regex(string testClass)
+        {
+            return testClass.Replace(".", "\\.");
         }
 
         private class ResultWriter : ICallbacks
         {
             private readonly TestRunnerApi api;
+            private readonly string label;
+            private readonly string resultsPath;
+            private readonly string menuName;
             private readonly List<ITestResultAdaptor> leaves = new List<ITestResultAdaptor>();
 
-            public ResultWriter(TestRunnerApi owner)
+            public ResultWriter(TestRunnerApi owner, string suiteLabel, string path, string menu)
             {
                 api = owner;
+                label = suiteLabel;
+                resultsPath = path;
+                menuName = menu;
             }
 
             public void RunStarted(ITestAdaptor testsToRun)
@@ -104,10 +133,11 @@ namespace LittleFarmStory.Tests
                 }
 
                 StringBuilder report = new StringBuilder();
-                report.AppendLine("# Economy Test Results");
+                report.AppendLine("# " + char.ToUpperInvariant(label[0]) + label.Substring(1) +
+                                  " Test Results");
                 report.AppendLine();
                 report.AppendLine("Generated " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
-                                  " by `Little Farm Story/Run Economy Tests`.");
+                                  " by `Little Farm Story/" + menuName + "`.");
                 report.AppendLine("Executed by the Unity Test Framework inside the running Editor.");
                 report.AppendLine();
                 report.AppendLine("**" + passed + " passed, " + failed + " failed, " + other +
@@ -117,16 +147,16 @@ namespace LittleFarmStory.Tests
 
                 try
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(ResultsPath));
-                    File.WriteAllText(ResultsPath, report.ToString(), Encoding.UTF8);
+                    Directory.CreateDirectory(Path.GetDirectoryName(resultsPath));
+                    File.WriteAllText(resultsPath, report.ToString(), Encoding.UTF8);
                 }
                 catch (Exception e)
                 {
-                    Debug.LogWarning("Little Farm Story: could not write " + ResultsPath + ": " + e.Message);
+                    Debug.LogWarning("Little Farm Story: could not write " + resultsPath + ": " + e.Message);
                 }
 
-                string summary = "Little Farm Story: economy tests - " + passed + " passed, " +
-                                 failed + " failed, " + other + " other. Results in " + ResultsPath;
+                string summary = "Little Farm Story: " + label + " tests - " + passed + " passed, " +
+                                 failed + " failed, " + other + " other. Results in " + resultsPath;
 
                 if (failed > 0 || leaves.Count == 0)
                 {

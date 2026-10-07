@@ -8,6 +8,7 @@ using LittleFarmStory.Economy;
 using LittleFarmStory.Farming;
 using LittleFarmStory.Interaction;
 using LittleFarmStory.Inventory;
+using LittleFarmStory.Persistence;
 using LittleFarmStory.Player;
 using LittleFarmStory.UI;
 using TMPro;
@@ -48,7 +49,16 @@ namespace LittleFarmStory.EditorTools
         private const string SuiteKey = "LittleFarmStory.GameplayLoopTest.Suite";
         private const string FullSuite = "Full";
         private const string Phase7Suite = "Phase7";
+        private const string Phase8Suite = "Phase8";
         private const string ResultsPath = "Documentation/RUNTIME_TEST_RESULTS.md";
+        private const string SaveResultsPath = "Documentation/SAVE_TEST_RESULTS.md";
+
+        /// <summary>
+        /// Phase 8 writes its own file so a save run cannot overwrite the shop run's evidence,
+        /// and so each report can be read as the record of one suite.
+        /// </summary>
+        private static string ActiveResultsPath =>
+            SessionState.GetString(SuiteKey, FullSuite) == Phase8Suite ? SaveResultsPath : ResultsPath;
 
         private enum Status
         {
@@ -145,6 +155,15 @@ namespace LittleFarmStory.EditorTools
 
         private static Vector3[] wanderStart;
 
+        // ---- Phase 8 persistence references and the state the save is checked against
+        private static SaveManager saveManager;
+        private static int savedCoins;
+        private static int savedSeeds;
+        private static Vector3 savedPlayerPosition;
+        private static PlotState savedPlotState;
+        private static float savedChickenHunger;
+        private static string savedPlotName;
+
         static GameplayLoopTest()
         {
             if (SessionState.GetBool(RunningKey, false))
@@ -166,6 +185,12 @@ namespace LittleFarmStory.EditorTools
             StartSuite(Phase7Suite, "Phase 7 runtime verification");
         }
 
+        [MenuItem("Little Farm Story/Run Phase 8 Save Verification", false, 44)]
+        public static void RunPhase8Test()
+        {
+            StartSuite(Phase8Suite, "Phase 8 save verification");
+        }
+
         private static void StartSuite(string suite, string label)
         {
             if (EditorApplication.isPlayingOrWillChangePlaymode)
@@ -180,6 +205,17 @@ namespace LittleFarmStory.EditorTools
             }
 
             EditorSceneManager.OpenScene(FarmPrototypeBuilder.ScenePath, OpenSceneMode.Single);
+
+            // Every suite asserts a farm that has just started - 100 coins, 10 seeds, empty
+            // plots. SaveManager loads any save it finds at startup, and the previous run's
+            // exit wrote one, so without this the assertions would be measured against the
+            // last run's leftovers instead of a new game.
+            if (SaveSystem.Exists())
+            {
+                SaveSystem.Delete();
+                Debug.Log("Little Farm Story: cleared the existing save so the " + label +
+                          " starts from a new game.");
+            }
 
             SessionState.SetString(SuiteKey, suite);
             SessionState.SetBool(RunningKey, true);
@@ -207,10 +243,15 @@ namespace LittleFarmStory.EditorTools
             {
                 string suite = SessionState.GetString(SuiteKey, FullSuite);
                 bool isPhase7 = suite == Phase7Suite;
+                bool isPhase8 = suite == Phase8Suite;
 
                 if (isPhase7)
                 {
                     BuildPhase7Steps();
+                }
+                else if (isPhase8)
+                {
+                    BuildPhase8Steps();
                 }
                 else
                 {
@@ -223,8 +264,14 @@ namespace LittleFarmStory.EditorTools
                 stepDeadline = Now + steps[0].TimeoutSeconds;
                 log.Add("# Runtime Test Results");
                 log.Add("");
-                log.Add("Generated " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " by `Little Farm Story/" +
-                        (isPhase7 ? "Run Phase 7 Runtime Verification" : "Run Gameplay Loop Test (Play Mode)") + "`.");
+                string menuName = isPhase7
+                    ? "Run Phase 7 Runtime Verification"
+                    : isPhase8
+                        ? "Run Phase 8 Save Verification"
+                        : "Run Gameplay Loop Test (Play Mode)";
+
+                log.Add("Generated " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                        " by `Little Farm Story/" + menuName + "`.");
                 log.Add("");
                 log.Add("Every step below drove the real interaction chain in Play mode:");
                 log.Add("player position -> proximity scan -> priority -> focus -> Interact ->");
@@ -311,28 +358,30 @@ namespace LittleFarmStory.EditorTools
                 ? "## Result: ALL STEPS PASSED"
                 : "## Result: FAILED at step " + (stepIndex + 1) + " of " + steps.Count);
 
+            string resultsPath = ActiveResultsPath;
+
             try
             {
-                string directory = Path.GetDirectoryName(ResultsPath);
+                string directory = Path.GetDirectoryName(resultsPath);
                 if (!string.IsNullOrEmpty(directory))
                 {
                     Directory.CreateDirectory(directory);
                 }
 
-                File.WriteAllText(ResultsPath, string.Join(Environment.NewLine, log), Encoding.UTF8);
+                File.WriteAllText(resultsPath, string.Join(Environment.NewLine, log), Encoding.UTF8);
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[GameplayTest] could not write " + ResultsPath + ": " + e.Message);
+                Debug.LogWarning("[GameplayTest] could not write " + resultsPath + ": " + e.Message);
             }
 
             if (passed)
             {
-                Debug.Log("[GameplayTest] ===== ALL STEPS PASSED ===== results written to " + ResultsPath);
+                Debug.Log("[GameplayTest] ===== ALL STEPS PASSED ===== results written to " + resultsPath);
             }
             else
             {
-                Debug.LogError("[GameplayTest] ===== FAILED ===== results written to " + ResultsPath);
+                Debug.LogError("[GameplayTest] ===== FAILED ===== results written to " + resultsPath);
             }
 
             steps = null;
@@ -469,6 +518,349 @@ namespace LittleFarmStory.EditorTools
                 new Step { Name = "Regression: the chicken can still be focused and fed", TimeoutSeconds = 6f, Run = FocusChicken },
                 new Step { Name = "Regression: the cow can still be focused and fed", TimeoutSeconds = 6f, Run = FocusCow }
             };
+        }
+
+        // ================================================================ Phase 8: save/load
+
+        /// <summary>
+        /// Proves a save round-trips through the real components.
+        ///
+        /// The app is never restarted - it does something stronger. It builds a distinctive
+        /// farm, saves it, then deliberately changes every one of those things to a DIFFERENT
+        /// value, and only then loads. Anything that comes back matching the save therefore
+        /// came out of the file, because the live value at load time was something else. A test
+        /// that saved and immediately loaded would pass even if Load() did nothing at all.
+        /// </summary>
+        private static void BuildPhase8Steps()
+        {
+            steps = new List<Step>
+            {
+                new Step { Name = "Scene: gameplay objects exist", TimeoutSeconds = 10f, Run = AcquireReferences },
+                new Step { Name = "Scene: economy and shop objects exist", TimeoutSeconds = 6f, Run = AcquireEconomyReferences },
+                new Step { Name = "Scene: the SaveManager exists and is wired", TimeoutSeconds = 6f, Run = Phase8_AcquireSaveManager },
+
+                new Step { Name = "Setup: build a farm state worth saving", TimeoutSeconds = 10f, Run = Phase8_BuildDistinctState },
+                new Step { Name = "Save: writing produces a real file on disk", TimeoutSeconds = 6f, Run = Phase8_SaveWritesAFile },
+                new Step { Name = "Save: the file's contents match the live farm", TimeoutSeconds = 6f, Run = Phase8_FileContentsMatchTheFarm },
+
+                new Step { Name = "Change: every saved value is deliberately changed", TimeoutSeconds = 10f, Run = Phase8_ChangeEverythingAfterSaving },
+
+                new Step { Name = "Load: coins and inventory come back from the file", TimeoutSeconds = 6f, Run = Phase8_LoadRestoresCoinsAndItems },
+                new Step { Name = "Load: the plot's crop and growth come back", TimeoutSeconds = 4f, Run = Phase8_LoadRestoresThePlot },
+                new Step { Name = "Load: the farmer returns to where he was saved", TimeoutSeconds = 4f, Run = Phase8_LoadRestoresThePlayer },
+                new Step { Name = "Load: the chicken's hunger comes back", TimeoutSeconds = 4f, Run = Phase8_LoadRestoresTheChicken },
+                new Step { Name = "Load: the HUD follows the restore without being told", TimeoutSeconds = 6f, Run = Phase8_HudFollowsTheRestore },
+
+                new Step { Name = "Delete: removing the save leaves nothing behind", TimeoutSeconds = 4f, Run = Phase8_DeleteRemovesTheFile },
+
+                // The load left a crop in the ground. Clearing it is what makes the tilling
+                // regression below a real test rather than one that fails on a busy plot.
+                new Step { Name = "Regression: the restored crop can be cleared", TimeoutSeconds = 4f, Run = Phase8_ClearRestoredCrop },
+                new Step { Name = "Regression: farming still works after a load", TimeoutSeconds = 8f, Run = Phase7_ReturnToPlot },
+                new Step { Name = "Regression: the plot can still be tilled", TimeoutSeconds = 4f, Run = Till },
+                new Step { Name = "Regression: the chicken can still be focused", TimeoutSeconds = 6f, Run = FocusChicken },
+                new Step { Name = "Regression: the cow can still be focused", TimeoutSeconds = 6f, Run = FocusCow }
+            };
+        }
+
+        private static StepResult Phase8_AcquireSaveManager()
+        {
+            saveManager = UnityEngine.Object.FindAnyObjectByType<SaveManager>();
+
+            if (saveManager == null)
+            {
+                return StepResult.Fail("no SaveManager in the scene - rebuild the farm scene");
+            }
+
+            // A manager that saves nothing would let every later step pass vacuously.
+            if (wallet == null || inventory == null)
+            {
+                return StepResult.Fail("the wallet or inventory reference was not acquired");
+            }
+
+            return StepResult.Pass("SaveManager found; save path " + SaveSystem.SavePath);
+        }
+
+        private static StepResult Phase8_BuildDistinctState()
+        {
+            // Plant something, so a crop mid-growth has to survive the round trip.
+            if (plot == null)
+            {
+                return StepResult.Fail("no plot reference");
+            }
+
+            if (plot.State == PlotState.Empty)
+            {
+                plot.TryTill();
+            }
+
+            if (plot.State == PlotState.Tilled)
+            {
+                FarmActionResult planted = plot.TryPlant(inventory);
+
+                if (planted != FarmActionResult.Success)
+                {
+                    return StepResult.Fail("could not plant a seed to save: " + planted);
+                }
+            }
+
+            // A coin total that cannot be confused with the starting 100.
+            wallet.AddCoins(23);
+
+            // Move somewhere the farmer would never spawn.
+            movementScript.RestoreTransform(new Vector3(6.25f, player.transform.position.y, -12.5f), 137f);
+
+            savedCoins = wallet.GetBalance();
+            savedSeeds = inventory.GetQuantity(wheat.SeedItemId);
+            savedPlayerPosition = player.transform.position;
+            savedPlotState = plot.State;
+            savedPlotName = plot.name;
+            savedChickenHunger = chicken.Needs.Hunger;
+
+            return StepResult.Pass("coins=" + savedCoins + ", seeds=" + savedSeeds + ", " +
+                                   savedPlotName + " is " + savedPlotState + ", farmer at " +
+                                   savedPlayerPosition.ToString("0.0"));
+        }
+
+        private static StepResult Phase8_SaveWritesAFile()
+        {
+            if (!saveManager.Save())
+            {
+                return StepResult.Fail("SaveManager.Save() reported failure");
+            }
+
+            if (!SaveSystem.Exists())
+            {
+                return StepResult.Fail("Save() succeeded but no file exists at " + SaveSystem.SavePath);
+            }
+
+            FileInfo info = new FileInfo(SaveSystem.SavePath);
+
+            if (info.Length <= 0)
+            {
+                return StepResult.Fail("the save file is empty");
+            }
+
+            return StepResult.Pass("wrote " + info.Length + " bytes to " + SaveSystem.SavePath);
+        }
+
+        private static StepResult Phase8_FileContentsMatchTheFarm()
+        {
+            // Read the file back independently of SaveManager, so this checks what actually
+            // landed on disk rather than what the manager believes it wrote.
+            if (!SaveSystem.TryRead(out SaveData data))
+            {
+                return StepResult.Fail("the file written a moment ago could not be read back");
+            }
+
+            if (data.Coins != savedCoins)
+            {
+                return StepResult.Fail("the file holds " + data.Coins + " coins, the farm had " + savedCoins);
+            }
+
+            int seedsInFile = 0;
+
+            for (int i = 0; i < data.Inventory.Count; i++)
+            {
+                if (data.Inventory[i].ItemId == wheat.SeedItemId)
+                {
+                    seedsInFile = data.Inventory[i].Amount;
+                }
+            }
+
+            if (seedsInFile != savedSeeds)
+            {
+                return StepResult.Fail("the file holds " + seedsInFile + " wheat seeds, the farm had " + savedSeeds);
+            }
+
+            int plotsInFile = 0;
+
+            for (int i = 0; i < data.Fields.Count; i++)
+            {
+                plotsInFile += data.Fields[i].Plots.Count;
+            }
+
+            if (plotsInFile < 40)
+            {
+                return StepResult.Fail("the file holds only " + plotsInFile + " plots; the farm has three fields");
+            }
+
+            if (data.Animals.Count < 9)
+            {
+                return StepResult.Fail("the file holds only " + data.Animals.Count + " animals; the farm has nine");
+            }
+
+            return StepResult.Pass("file holds " + data.Coins + " coins, " + seedsInFile + " seeds, " +
+                                   plotsInFile + " plots across " + data.Fields.Count + " fields, " +
+                                   data.Animals.Count + " animals");
+        }
+
+        private static StepResult Phase8_ChangeEverythingAfterSaving()
+        {
+            // Everything below is changed to a value the save does NOT contain, so a later
+            // match can only have come out of the file.
+            wallet.AddCoins(500);
+            inventory.Add(wheat.SeedItemId, 77);
+
+            // SetCrop(null) clears whatever is in the ground and drops the plot to Empty.
+            // Passing the CURRENT crop would be a no-op - SetCrop returns early when the crop
+            // has not actually changed.
+            plot.SetCrop(null);
+
+            movementScript.RestoreTransform(new Vector3(-24f, player.transform.position.y, 26f), 0f);
+
+            // Move hunger away from whatever it happened to be saved at. A fixed value could
+            // coincide with the saved one, and the step would then prove nothing.
+            chicken.Needs.Restore(savedChickenHunger > 0.5f ? 0.05f : 0.95f, chicken.Needs.Happiness);
+
+            bool coinsDiffer = wallet.GetBalance() != savedCoins;
+            bool seedsDiffer = inventory.GetQuantity(wheat.SeedItemId) != savedSeeds;
+            bool plotDiffers = plot.State != savedPlotState;
+            bool positionDiffers = (player.transform.position - savedPlayerPosition).sqrMagnitude > 1f;
+            bool hungerDiffers = Mathf.Abs(chicken.Needs.Hunger - savedChickenHunger) > 0.01f;
+
+            if (!coinsDiffer || !seedsDiffer || !plotDiffers || !positionDiffers || !hungerDiffers)
+            {
+                return StepResult.Fail(
+                    "the post-save state is not actually different (coins " + coinsDiffer +
+                    ", seeds " + seedsDiffer + ", plot " + plotDiffers +
+                    ", position " + positionDiffers + ", hunger " + hungerDiffers +
+                    "); the load steps would prove nothing");
+            }
+
+            return StepResult.Pass("coins " + savedCoins + "->" + wallet.GetBalance() +
+                                   ", seeds " + savedSeeds + "->" + inventory.GetQuantity(wheat.SeedItemId) +
+                                   ", plot " + savedPlotState + "->" + plot.State +
+                                   ", hunger " + savedChickenHunger.ToString("0.00") + "->" +
+                                   chicken.Needs.Hunger.ToString("0.00"));
+        }
+
+        private static StepResult Phase8_LoadRestoresCoinsAndItems()
+        {
+            if (!saveManager.Load())
+            {
+                return StepResult.Fail("SaveManager.Load() reported failure");
+            }
+
+            if (wallet.GetBalance() != savedCoins)
+            {
+                return StepResult.Fail("coins came back as " + wallet.GetBalance() + ", saved " + savedCoins);
+            }
+
+            int seeds = inventory.GetQuantity(wheat.SeedItemId);
+
+            if (seeds != savedSeeds)
+            {
+                return StepResult.Fail("wheat seeds came back as " + seeds + ", saved " + savedSeeds);
+            }
+
+            return StepResult.Pass("coins restored to " + savedCoins + ", wheat seeds to " + savedSeeds);
+        }
+
+        private static StepResult Phase8_LoadRestoresThePlot()
+        {
+            if (plot.State != savedPlotState)
+            {
+                return StepResult.Fail(savedPlotName + " came back as " + plot.State +
+                                       ", saved " + savedPlotState);
+            }
+
+            if (savedPlotState != PlotState.Empty && plot.Crop == null)
+            {
+                return StepResult.Fail(savedPlotName + " is " + plot.State + " but has no crop");
+            }
+
+            return StepResult.Pass(savedPlotName + " restored to " + plot.State +
+                                   " growing " + (plot.Crop != null ? plot.Crop.CropId : "nothing"));
+        }
+
+        private static StepResult Phase8_LoadRestoresThePlayer()
+        {
+            float distance = (player.transform.position - savedPlayerPosition).magnitude;
+
+            if (distance > 0.35f)
+            {
+                return StepResult.Fail("the farmer came back " + distance.ToString("0.00") +
+                                       "m from where he was saved");
+            }
+
+            return StepResult.Pass("farmer restored to within " + distance.ToString("0.00") +
+                                   "m of " + savedPlayerPosition.ToString("0.0"));
+        }
+
+        private static StepResult Phase8_LoadRestoresTheChicken()
+        {
+            float hunger = chicken.Needs.Hunger;
+
+            // The habitat keeps ticking hunger while the suite runs, so a restored value drifts
+            // slightly by the time this step reads it. The tolerance covers one simulation tick
+            // at the editor's accelerated speed; it is far tighter than the gap to the value
+            // hunger was deliberately changed to before the load.
+            if (Mathf.Abs(hunger - savedChickenHunger) > 0.15f)
+            {
+                return StepResult.Fail("the chicken's hunger came back as " + hunger.ToString("0.00") +
+                                       ", saved " + savedChickenHunger.ToString("0.00"));
+            }
+
+            return StepResult.Pass("chicken hunger restored to " + hunger.ToString("0.00"));
+        }
+
+        private static StepResult Phase8_HudFollowsTheRestore()
+        {
+            // Nothing pushes a number into the HUD: it updates only because the restore paths
+            // raise the same events gameplay does. If this passes, that wiring survived.
+            TMP_Text coinLabel = FindLabel("CoinValue");
+
+            if (coinLabel == null)
+            {
+                return StepResult.Fail("the HUD has no CoinValue label");
+            }
+
+            string expected = savedCoins.ToString();
+
+            if (coinLabel.text.Trim() != expected)
+            {
+                return StepResult.Fail("the HUD shows '" + coinLabel.text.Trim() +
+                                       "' coins but the restored balance is " + expected);
+            }
+
+            return StepResult.Pass("HUD coin display followed the restore to " + expected +
+                                   " through CurrencyWallet.BalanceChanged alone");
+        }
+
+        private static StepResult Phase8_DeleteRemovesTheFile()
+        {
+            if (!saveManager.DeleteSave())
+            {
+                return StepResult.Fail("DeleteSave() reported failure");
+            }
+
+            if (SaveSystem.Exists())
+            {
+                return StepResult.Fail("the save file is still on disk after DeleteSave()");
+            }
+
+            if (saveManager.HasSave)
+            {
+                return StepResult.Fail("HasSave still reports a save after DeleteSave()");
+            }
+
+            return StepResult.Pass("save file deleted; the next run starts from a new game");
+        }
+
+        private static StepResult Phase8_ClearRestoredCrop()
+        {
+            plot.SetCrop(null);
+
+            if (plot.State != PlotState.Empty)
+            {
+                return StepResult.Fail("clearing the crop left " + plot.name + " in " + plot.State);
+            }
+
+            // Put the field's own crop back, so the plot behaves exactly as a fresh one would.
+            plot.SetCrop(wheat);
+
+            return StepResult.Pass(plot.name + " cleared back to Empty and re-assigned " + wheat.CropId);
         }
 
         private static StepResult AcquireEconomyReferences()

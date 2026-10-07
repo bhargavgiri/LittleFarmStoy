@@ -70,6 +70,27 @@ namespace LittleFarmStory.Player
             verticalVelocity = groundedStick;
         }
 
+        /// <summary>
+        /// Which way the farmer is facing. Read from the visual root rather than the root
+        /// transform, because movement only ever turns the visual - the root never rotates.
+        /// </summary>
+        public float VisualYaw =>
+            visualRoot != null ? visualRoot.eulerAngles.y : transform.eulerAngles.y;
+
+        /// <summary>
+        /// Restores a saved position and facing. Facing is applied to the visual root, which is
+        /// the transform <see cref="Teleport"/> alone would leave untouched.
+        /// </summary>
+        public void RestoreTransform(Vector3 position, float visualYaw)
+        {
+            Teleport(position, transform.rotation);
+
+            if (visualRoot != null)
+            {
+                visualRoot.rotation = Quaternion.Euler(0f, visualYaw, 0f);
+            }
+        }
+
         private void Update()
         {
             float dt = Time.deltaTime;
